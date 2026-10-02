@@ -84,12 +84,12 @@ public final class Models {
 
     public record Order(long id, long userId, String status, List<OrderLine> lines, long subtotalPaise,
                         long discountPaise, long shippingPaise, long totalPaise, String couponCode, String idempotencyKey,
-                        Payment payment, Instant createdAt, Instant updatedAt) {
+                        Payment payment, Instant createdAt, Instant updatedAt, Instant expiresAt) {
     }
 
     /** Everything placeOrder needs to write in ONE transaction. */
     public record OrderDraft(long userId, String idempotencyKey, List<OrderLine> lines, Pricing pricing,
-                             String couponCode, String paymentId, Instant at) {
+                             String couponCode, String paymentId, Instant at, Instant expiresAt) {
     }
 
     public record NewEvent(String type, Map<String, Object> payload) {

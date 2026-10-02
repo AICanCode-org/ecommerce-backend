@@ -215,7 +215,7 @@ public class InMemoryStore implements UserRepository, ProductRepository, CartRep
     private Order withPayment(Order o) {
         return new Order(o.id(), o.userId(), o.status(), o.lines(), o.subtotalPaise(), o.discountPaise(),
                 o.shippingPaise(), o.totalPaise(), o.couponCode(), o.idempotencyKey(), payments.get(o.payment().id()),
-                o.createdAt(), o.updatedAt());
+                o.createdAt(), o.updatedAt(), o.expiresAt());
     }
 
     @Override
@@ -245,7 +245,7 @@ public class InMemoryStore implements UserRepository, ProductRepository, CartRep
         Payment payment = new Payment(d.paymentId(), id, PAYMENT_PROVIDER, "PENDING", pr.totalPaise(), d.at(), d.at());
         Order order = new Order(id, d.userId(), "PENDING_PAYMENT", List.copyOf(d.lines()), pr.subtotalPaise(),
                 pr.discountPaise(), pr.shippingPaise(), pr.totalPaise(), d.couponCode(), d.idempotencyKey(), payment,
-                d.at(), d.at());
+                d.at(), d.at(), d.expiresAt());
         payments.put(payment.id(), payment);
         orders.put(id, order);
         event("order.placed", id, Models.orderEventPayload(d.userId(), id, "PENDING_PAYMENT", pr.totalPaise()), d.at());
@@ -273,6 +273,13 @@ public class InMemoryStore implements UserRepository, ProductRepository, CartRep
     public synchronized List<Order> ordersByStatus(String status, int limit) {
         return orders.values().stream().filter(o -> status == null || o.status().equals(status))
                 .sorted(Comparator.comparingLong(Order::id).reversed()).limit(limit).map(this::withPayment).toList();
+    }
+
+    @Override
+    public synchronized List<Order> expiredOrders(Instant now, int limit) {
+        return orders.values().stream()
+                .filter(o -> "PENDING_PAYMENT".equals(o.status()) && !o.expiresAt().isAfter(now))
+                .sorted(Comparator.comparingLong(Order::id)).limit(limit).map(this::withPayment).toList();
     }
 
     @Override
@@ -309,7 +316,8 @@ public class InMemoryStore implements UserRepository, ProductRepository, CartRep
         if (t.toStatus() != null) {
             orders.put(order.id(), new Order(order.id(), order.userId(), t.toStatus(), order.lines(),
                     order.subtotalPaise(), order.discountPaise(), order.shippingPaise(), order.totalPaise(),
-                    order.couponCode(), order.idempotencyKey(), order.payment(), order.createdAt(), t.at()));
+                    order.couponCode(), order.idempotencyKey(), order.payment(), order.createdAt(), t.at(),
+                    order.expiresAt()));
         }
         if (t.restock()) {
             for (OrderLine line : order.lines()) {
@@ -343,7 +351,7 @@ public class InMemoryStore implements UserRepository, ProductRepository, CartRep
         Order o = orders.get(orderId);
         orders.put(orderId, new Order(o.id(), o.userId(), status, o.lines(), o.subtotalPaise(), o.discountPaise(),
                 o.shippingPaise(), o.totalPaise(), o.couponCode(), o.idempotencyKey(), o.payment(), o.createdAt(),
-                o.updatedAt()));
+                o.updatedAt(), o.expiresAt()));
     }
 
     /** Test helper: change a user's role directly (there is no role endpoint in ShopFlow). */

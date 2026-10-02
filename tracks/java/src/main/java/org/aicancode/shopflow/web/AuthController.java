@@ -1,6 +1,8 @@
 package org.aicancode.shopflow.web;
 
 import java.util.Map;
+import org.aicancode.shopflow.domain.ApiException;
+import org.aicancode.shopflow.metrics.Metrics;
 import org.aicancode.shopflow.service.AuthService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,19 +19,30 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private final AuthService auth;
+    private final Metrics metrics;
 
-    public AuthController(AuthService auth) {
+    public AuthController(AuthService auth, Metrics metrics) {
         this.auth = auth;
+        this.metrics = metrics;
     }
 
     @PostMapping("/api/v1/auth/register")
     public ResponseEntity<Map<String, Object>> register(@RequestBody(required = false) Object body) {
-        return ResponseEntity.status(201).body(Json.user(auth.register(body)));
+        Map<String, Object> user = Json.user(auth.register(body));
+        metrics.inc(Metrics.USERS_REGISTERED);
+        return ResponseEntity.status(201).body(user);
     }
 
     @PostMapping("/api/v1/auth/login")
     public Map<String, Object> login(@RequestBody(required = false) Object body) {
-        return Json.login(auth.login(body));
+        try {
+            return Json.login(auth.login(body));
+        } catch (ApiException e) {
+            if (e.status() == 401) {
+                metrics.inc(Metrics.LOGINS_FAILED);
+            }
+            throw e;
+        }
     }
 
     @GetMapping("/api/v1/me")

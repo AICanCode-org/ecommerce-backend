@@ -4,6 +4,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.util.Map;
 import org.aicancode.shopflow.domain.Models.Principal;
 import org.aicancode.shopflow.domain.Validation;
+import org.aicancode.shopflow.metrics.Metrics;
 import org.aicancode.shopflow.service.AuthService;
 import org.aicancode.shopflow.service.OrderService;
 import org.aicancode.shopflow.service.OutboxService;
@@ -24,8 +25,11 @@ public class OrderController {
     private final OrderService orders;
     private final PaymentService payments;
     private final OutboxService outbox;
+    private final Metrics metrics;
 
-    public OrderController(AuthService auth, OrderService orders, PaymentService payments, OutboxService outbox) {
+    public OrderController(AuthService auth, OrderService orders, PaymentService payments, OutboxService outbox,
+                           Metrics metrics) {
+        this.metrics = metrics;
         this.auth = auth;
         this.orders = orders;
         this.payments = payments;
@@ -43,6 +47,7 @@ public class OrderController {
         if (result.replayed()) {
             response.header("Idempotent-Replayed", "true");
         }
+        metrics.inc(result.replayed() ? Metrics.CHECKOUT_REPLAYS : Metrics.ORDERS_PLACED);
         return response.body(Json.order(result.order()));
     }
 
@@ -73,6 +78,14 @@ public class OrderController {
                 ProductController.param(request, "limit")));
     }
 
+    /** v1.1: cancel unpaid orders whose payment window closed (run it from a cron job or by hand). */
+    @PostMapping("/api/v1/admin/orders/expire")
+    public Map<String, Object> expire(@RequestHeader(value = "Authorization", required = false) String authorization) {
+        int expired = orders.expireOverdue(auth.authenticate(authorization));
+        metrics.inc(Metrics.ORDERS_EXPIRED, expired);
+        return Map.of("expired", expired);
+    }
+
     @PostMapping("/api/v1/admin/orders/{id}/status")
     public Map<String, Object> adminSetStatus(@PathVariable String id, @RequestBody(required = false) Object body,
             @RequestHeader(value = "Authorization", required = false) String authorization) {
@@ -84,7 +97,11 @@ public class OrderController {
     @PostMapping(value = "/api/v1/payments/webhook", consumes = "*/*")
     public Map<String, Object> webhook(@RequestBody(required = false) byte[] body,
             @RequestHeader(value = "X-Signature", required = false) String signature) {
-        return payments.handleWebhook(body == null ? new byte[0] : body, signature);
+        Map<String, Object> result = payments.handleWebhook(body == null ? new byte[0] : body, signature);
+        if ("duplicate".equals(result.get("status"))) {
+            metrics.inc(Metrics.WEBHOOKS_DUPLICATE);
+        }
+        return result;
     }
 
     @GetMapping("/api/v1/admin/outbox")

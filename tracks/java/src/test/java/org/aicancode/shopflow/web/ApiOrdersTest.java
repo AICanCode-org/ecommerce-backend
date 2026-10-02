@@ -36,7 +36,8 @@ class ApiOrdersTest {
                 + "\"quantity\":1,\"lineTotalPaise\":45000}],\"subtotalPaise\":45000,\"discountPaise\":0,"
                 + "\"shippingPaise\":4900,\"totalPaise\":49900,\"total\":\"₹499.00\",\"couponCode\":null,"
                 + "\"payment\":{\"id\":\"pay_test_1\",\"provider\":\"fakepay\",\"status\":\"PENDING\",\"amountPaise\":49900},"
-                + "\"createdAt\":\"2026-10-02T09:30:00.000Z\",\"updatedAt\":\"2026-10-02T09:30:00.000Z\"}");
+                + "\"createdAt\":\"2026-10-02T09:30:00.000Z\",\"updatedAt\":\"2026-10-02T09:30:00.000Z\","
+                + "\"expiresAt\":\"2026-10-02T09:45:00.000Z\"}");
         Res again = api.checkout(session, "checkout-key-0001");
         assertThat(again.status()).isEqualTo(200);
         assertThat(again.header("Idempotent-Replayed")).isEqualTo("true");

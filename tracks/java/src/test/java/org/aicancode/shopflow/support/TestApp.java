@@ -12,6 +12,7 @@ import org.aicancode.shopflow.ai.DescriptionService;
 import org.aicancode.shopflow.ai.RuleParser;
 import org.aicancode.shopflow.ai.SearchAssistService;
 import org.aicancode.shopflow.ai.TemplateWriter;
+import org.aicancode.shopflow.metrics.Metrics;
 import org.aicancode.shopflow.security.PasswordHasher;
 import org.aicancode.shopflow.security.TokenService;
 import org.aicancode.shopflow.security.Webhooks;
@@ -24,9 +25,11 @@ import org.aicancode.shopflow.service.PaymentService;
 import org.aicancode.shopflow.web.AuthController;
 import org.aicancode.shopflow.web.CartController;
 import org.aicancode.shopflow.web.HealthController;
+import org.aicancode.shopflow.web.MetricsController;
 import org.aicancode.shopflow.web.OrderController;
 import org.aicancode.shopflow.web.ProblemHandler;
 import org.aicancode.shopflow.web.ProductController;
+import org.aicancode.shopflow.web.RequestIdFilter;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -49,21 +52,29 @@ public class TestApp {
     public final InMemoryStore store = new InMemoryStore();
     public final MutableClock clock = new MutableClock();
     public final MockMvc mvc;
+    public final Metrics metrics;
     private int n;
     private JsonNode adminSession;
 
     public TestApp() {
+        this(offlineDescriptions(), offlineAssist(), new Metrics());
+    }
+
+    /** The real controllers on in-memory adapters; pass other AI services to test fallbacks (v1.1). */
+    public TestApp(DescriptionService descriptions, SearchAssistService assist, Metrics metrics) {
+        this.metrics = metrics;
         AuthService auth = auth(store, clock);
         auth.ensureAdmin("admin@shopflow.test", "admin-password");
         CatalogService catalog = new CatalogService(store, clock);
         OrderService orders = new OrderService(store, store, clock, paymentIds());
-        mvc = MockMvcBuilders.standaloneSetup(new AuthController(auth),
-                        new ProductController(auth, catalog, offlineDescriptions(), offlineAssist(), clock),
+        mvc = MockMvcBuilders.standaloneSetup(new AuthController(auth, metrics),
+                        new ProductController(auth, catalog, descriptions, assist, clock, metrics),
                         new CartController(auth, new CartService(store, store, clock)),
                         new OrderController(auth, orders, new PaymentService(store, WEBHOOK_SECRET, clock),
-                                new OutboxService(store, event -> { }, clock)),
-                        new HealthController(auth))
+                                new OutboxService(store, event -> { }, clock), metrics),
+                        new HealthController(auth), new MetricsController(metrics))
                 .setControllerAdvice(new ProblemHandler())
+                .addFilters(new RequestIdFilter())
                 .build();
     }
 
@@ -106,7 +117,8 @@ public class TestApp {
             headers.forEach(b::header);
             MockHttpServletResponse r = mvc.perform(b).andReturn().getResponse();
             String text = r.getContentAsString(StandardCharsets.UTF_8);
-            return new Res(r.getStatus(), r, text.isEmpty() ? null : JSON.readTree(text));
+            boolean json = r.getContentType() != null && r.getContentType().contains("json");
+            return new Res(r.getStatus(), r, text.isEmpty() || !json ? null : JSON.readTree(text));
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }

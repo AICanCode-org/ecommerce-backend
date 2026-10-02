@@ -374,6 +374,27 @@ class ApiIntegrationTest {
                 + order.get("totalPaise").asLong() + "}"));
     }
 
+    /** v1.1: V2 adds orders.expires_at; the expiry job cancels overdue unpaid orders and restocks them. */
+    @Test
+    void expiresOverdueUnpaidOrdersInTheDatabase() throws Exception {
+        JsonNode asha = customer("asha@shopflow.test");
+        product("EXP-1", Map.of("stock", 2));
+        add(asha, "EXP-1", 2);
+        JsonNode order = checkout(asha, "expiry-int-0001").json();
+        long id = order.get("id").asLong();
+        assertThat(order.get("expiresAt").isNull()).isFalse();
+        assertThat(jdbcClient.sql("SELECT version FROM schema_migrations ORDER BY version").query(Integer.class).list())
+                .containsExactly(1, 2);
+        String url = "/api/v1/admin/orders/expire";
+        assertThat(send("POST", url, null, admin()).json().get("expired").asInt()).isZero();
+        jdbcClient.sql("UPDATE orders SET expires_at = now() - interval '1 second' WHERE id = ?").param(id).update();
+        assertThat(send("POST", url, null, admin()).json().get("expired").asInt()).isEqualTo(1);
+        assertThat(jdbcClient.sql("SELECT status FROM orders WHERE id = ?").param(id).query(String.class).single())
+                .isEqualTo("CANCELLED");
+        assertThat(count("SELECT stock FROM products WHERE sku = 'EXP-1'")).isEqualTo(2);
+        assertThat(send("POST", url, null, admin()).json().get("expired").asInt()).isZero();
+    }
+
     @Test
     void bootstrapsTheAdminFromTheEnvironment() {
         assertThat(jdbcClient.sql("SELECT role FROM users WHERE email = ?").param(ADMIN_EMAIL).query(String.class).single())

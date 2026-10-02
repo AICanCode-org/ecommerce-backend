@@ -28,6 +28,9 @@ public interface OrderRepository {
 
     List<Order> ordersByStatus(String status, int limit);
 
+    /** v1.1: unpaid orders whose payment window closed at or before {@code now}, oldest first. */
+    List<Order> expiredOrders(Instant now, int limit);
+
     Optional<Payment> findPayment(String paymentId);
 
     boolean hasPaymentEvent(String eventId);

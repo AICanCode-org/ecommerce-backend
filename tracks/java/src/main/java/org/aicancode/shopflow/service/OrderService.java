@@ -1,6 +1,8 @@
 package org.aicancode.shopflow.service;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.function.Supplier;
 import org.aicancode.shopflow.domain.ApiException;
@@ -22,6 +24,10 @@ import org.aicancode.shopflow.repo.OrderRepository;
 
 /** Idempotent checkout, all-or-nothing stock, the order state machine. */
 public class OrderService {
+
+    /** v1.1: how long an unpaid order holds its stock. */
+    public static final Duration RESERVATION_TTL = Duration.ofMinutes(15);
+    static final int EXPIRE_BATCH = 100;
 
     private final OrderRepository orders;
     private final CartRepository carts;
@@ -59,8 +65,10 @@ public class OrderService {
         Pricing pricing = Money.priceCart(CartService.priced(state.lines()), coupon);
         List<OrderLine> lines = state.lines().stream().map(x -> new OrderLine(x.product().id(), x.product().sku(),
                 x.product().name(), x.product().pricePaise(), x.quantity())).toList();
+        Instant now = Times.now(clock);
         OrderDraft draft = new OrderDraft(principal.userId(), key, lines, pricing,
-                pricing.couponApplied() ? state.couponCode() : null, newPaymentId.get(), Times.now(clock));
+                pricing.couponApplied() ? state.couponCode() : null, newPaymentId.get(), now,
+                now.plus(RESERVATION_TTL));
         try {
             return new Checkout(orders.placeOrder(draft), false);
         } catch (InsufficientStockException e) {
@@ -96,6 +104,23 @@ public class OrderService {
         AuthService.requireRole(principal, "ADMIN");
         String target = Validation.orderStatusTarget(Validation.requireObject(payload).get("status"));
         return apply(get(principal, orderId), Orders.ACTION_FOR_TARGET.get(target));
+    }
+
+    /**
+     * v1.1: cancel unpaid orders whose payment window closed and put their stock back. Safe to run any time and
+     * from several places at once: each order goes through the same compare-and-set transition, so an order paid
+     * a millisecond ago is simply skipped.
+     */
+    public int expireOverdue(Principal principal) {
+        AuthService.requireRole(principal, "ADMIN");
+        Instant now = Times.now(clock);
+        int expired = 0;
+        for (Order order : orders.expiredOrders(now, EXPIRE_BATCH)) {
+            if ("ok".equals(orders.applyTransition(Orders.transitionFor(order, "expire", now)))) {
+                expired++;
+            }
+        }
+        return expired;
     }
 
     public Order apply(Order order, String action) {

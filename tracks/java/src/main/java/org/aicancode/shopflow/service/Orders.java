@@ -17,6 +17,7 @@ public final class Orders {
             "PENDING_PAYMENT:pay", "PAID",
             "PENDING_PAYMENT:fail", "CANCELLED",
             "PENDING_PAYMENT:cancel", "CANCELLED",
+            "PENDING_PAYMENT:expire", "CANCELLED", // v1.1: the payment window closed
             "PAID:cancel", "CANCELLED",
             "PAID:ship", "SHIPPED",
             "SHIPPED:deliver", "DELIVERED");

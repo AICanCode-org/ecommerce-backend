@@ -14,6 +14,7 @@ import org.aicancode.shopflow.domain.Models.ProductQuery;
 import org.aicancode.shopflow.domain.Models.SearchFilters;
 import org.aicancode.shopflow.domain.Times;
 import org.aicancode.shopflow.domain.Validation;
+import org.aicancode.shopflow.metrics.Metrics;
 import org.aicancode.shopflow.service.AuthService;
 import org.aicancode.shopflow.service.CatalogService;
 import org.springframework.http.ResponseEntity;
@@ -35,9 +36,11 @@ public class ProductController {
     private final DescriptionService descriptions;
     private final SearchAssistService assist;
     private final Clock clock;
+    private final Metrics metrics;
 
     public ProductController(AuthService auth, CatalogService catalog, DescriptionService descriptions,
-                             SearchAssistService assist, Clock clock) {
+                             SearchAssistService assist, Clock clock, Metrics metrics) {
+        this.metrics = metrics;
         this.auth = auth;
         this.catalog = catalog;
         this.descriptions = descriptions;
@@ -101,6 +104,9 @@ public class ProductController {
         List<String> words = body == null ? List.of() : Validation.keywords(Validation.requireObject(body).get("keywords"));
         Product product = catalog.get(who, sku);
         DescriptionService.Draft result = descriptions.draft(product, words);
+        if (result.fallback()) {
+            metrics.inc(Metrics.AI_FALLBACK);
+        }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("sku", product.sku());
         m.put("provider", result.provider());
@@ -115,6 +121,9 @@ public class ProductController {
         String query = Validation.assistQuery(param(request, "q"));
         List<String> known = catalog.categories().stream().map(CategoryCount::name).toList();
         SearchAssistService.Assist result = assist.interpret(query, known);
+        if (result.fallback()) {
+            metrics.inc(Metrics.AI_FALLBACK);
+        }
         SearchFilters f = result.filters();
         String terms = String.join(" ", f.terms());
         CatalogService.Page page = catalog.search(new ProductQuery(ASSIST_RESULTS, null, terms.isEmpty() ? null : terms,

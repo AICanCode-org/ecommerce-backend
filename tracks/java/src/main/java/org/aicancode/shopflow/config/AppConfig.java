@@ -4,8 +4,10 @@ import com.zaxxer.hikari.HikariDataSource;
 import java.nio.file.Path;
 import java.time.Clock;
 import javax.sql.DataSource;
+import org.aicancode.shopflow.ai.CircuitBreaker;
 import org.aicancode.shopflow.ai.DescriptionService;
 import org.aicancode.shopflow.ai.HttpLlmClient;
+import org.aicancode.shopflow.ai.LlmClient;
 import org.aicancode.shopflow.ai.LlmParser;
 import org.aicancode.shopflow.ai.LlmWriter;
 import org.aicancode.shopflow.ai.RuleParser;
@@ -13,6 +15,7 @@ import org.aicancode.shopflow.ai.SearchAssistService;
 import org.aicancode.shopflow.ai.TemplateWriter;
 import org.aicancode.shopflow.db.DatabaseUrl;
 import org.aicancode.shopflow.db.Migrator;
+import org.aicancode.shopflow.metrics.Metrics;
 import org.aicancode.shopflow.repo.CartRepository;
 import org.aicancode.shopflow.repo.JdbcCartRepository;
 import org.aicancode.shopflow.repo.JdbcOrderRepository;
@@ -101,18 +104,33 @@ public class AppConfig {
         return auth;
     }
 
-    private static HttpLlmClient llm(AppProperties props) {
-        return new HttpLlmClient(props.llmBaseUrl(), props.llmModel(), props.llmApiKey(), props.llmTimeoutMs());
+    @Bean
+    public Metrics metrics() {
+        return new Metrics();
+    }
+
+    /** One LLM client behind one circuit breaker, shared by both AI features (v1.1). Null = offline. */
+    @Bean
+    public LlmClientHolder llmClient(AppProperties props, Metrics metrics) {
+        if (!props.llmEnabled()) {
+            return new LlmClientHolder(null);
+        }
+        HttpLlmClient http = new HttpLlmClient(props.llmBaseUrl(), props.llmModel(), props.llmApiKey(), props.llmTimeoutMs());
+        return new LlmClientHolder(new CircuitBreaker(http, () -> metrics.inc(Metrics.LLM_SHORT_CIRCUITS)));
+    }
+
+    /** Wrapper so "no LLM configured" can be a bean too. */
+    public record LlmClientHolder(LlmClient client) {
     }
 
     @Bean
-    public DescriptionService descriptionService(AppProperties props) {
-        return new DescriptionService(new TemplateWriter(), props.llmEnabled() ? new LlmWriter(llm(props)) : null);
+    public DescriptionService descriptionService(LlmClientHolder llm) {
+        return new DescriptionService(new TemplateWriter(), llm.client() == null ? null : new LlmWriter(llm.client()));
     }
 
     @Bean
-    public SearchAssistService searchAssistService(AppProperties props) {
-        return new SearchAssistService(new RuleParser(), props.llmEnabled() ? new LlmParser(llm(props)) : null);
+    public SearchAssistService searchAssistService(LlmClientHolder llm) {
+        return new SearchAssistService(new RuleParser(), llm.client() == null ? null : new LlmParser(llm.client()));
     }
 
     @Bean

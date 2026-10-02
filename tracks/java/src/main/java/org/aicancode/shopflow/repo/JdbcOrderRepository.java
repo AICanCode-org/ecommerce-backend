@@ -29,7 +29,7 @@ public class JdbcOrderRepository implements OrderRepository {
 
     static final String ORDER_SELECT = """
             SELECT o.id, o.user_id, o.status, o.subtotal_paise, o.discount_paise, o.shipping_paise, o.total_paise,
-                   o.coupon_code, o.idempotency_key, o.created_at, o.updated_at,
+                   o.coupon_code, o.idempotency_key, o.created_at, o.updated_at, o.expires_at,
                    p.id AS payment_id, p.provider, p.status AS payment_status, p.amount_paise,
                    p.created_at AS payment_created_at, p.updated_at AS payment_updated_at,
                    COALESCE((SELECT json_agg(json_build_object('product_id', i.product_id, 'sku', i.sku, 'name', i.name,
@@ -71,7 +71,7 @@ public class JdbcOrderRepository implements OrderRepository {
         return new Order(rs.getLong("id"), rs.getLong("user_id"), rs.getString("status"), List.copyOf(lines),
                 rs.getLong("subtotal_paise"), rs.getLong("discount_paise"), rs.getLong("shipping_paise"),
                 rs.getLong("total_paise"), rs.getString("coupon_code"), rs.getString("idempotency_key"), payment,
-                Jdbc.instant(rs, "created_at"), Jdbc.instant(rs, "updated_at"));
+                Jdbc.instant(rs, "created_at"), Jdbc.instant(rs, "updated_at"), Jdbc.instant(rs, "expires_at"));
     }
 
     @Override
@@ -96,10 +96,11 @@ public class JdbcOrderRepository implements OrderRepository {
                 }
                 Pricing p = d.pricing();
                 long orderId = jdbc.sql("INSERT INTO orders (user_id, status, subtotal_paise, discount_paise, "
-                                + "shipping_paise, total_paise, coupon_code, idempotency_key, created_at, updated_at) "
-                                + "VALUES (?, 'PENDING_PAYMENT', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+                                + "shipping_paise, total_paise, coupon_code, idempotency_key, created_at, updated_at, "
+                                + "expires_at) VALUES (?, 'PENDING_PAYMENT', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
                         .params(d.userId(), p.subtotalPaise(), p.discountPaise(), p.shippingPaise(), p.totalPaise(),
-                                d.couponCode(), d.idempotencyKey(), Jdbc.ts(d.at()), Jdbc.ts(d.at()))
+                                d.couponCode(), d.idempotencyKey(), Jdbc.ts(d.at()), Jdbc.ts(d.at()),
+                                Jdbc.ts(d.expiresAt()))
                         .query(Long.class).single();
                 int n = 0;
                 for (OrderLine line : d.lines()) {
@@ -146,6 +147,12 @@ public class JdbcOrderRepository implements OrderRepository {
         }
         return jdbc.sql(ORDER_SELECT + "WHERE o.status = ? ORDER BY o.id DESC LIMIT ?").params(status, limit)
                 .query(JdbcOrderRepository::order).list();
+    }
+
+    @Override
+    public List<Order> expiredOrders(Instant now, int limit) {
+        return jdbc.sql(ORDER_SELECT + "WHERE o.status = 'PENDING_PAYMENT' AND o.expires_at <= ? ORDER BY o.id LIMIT ?")
+                .params(Jdbc.ts(now), limit).query(JdbcOrderRepository::order).list();
     }
 
     @Override
