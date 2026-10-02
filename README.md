@@ -3,6 +3,92 @@
 [![CI](https://github.com/AICanCode-org/ecommerce-backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AICanCode-org/ecommerce-backend/actions/workflows/ci.yml)
 [![CI (solution)](https://github.com/AICanCode-org/ecommerce-backend/actions/workflows/ci.yml/badge.svg?branch=solution)](https://github.com/AICanCode-org/ecommerce-backend/actions/workflows/ci.yml?query=branch%3Asolution)
 
+## Case study (reference solution)
+
+> **ShopFlow is the backend of a small online shop that never oversells, never charges twice and never
+> loses a payment, with AI search and product copy that are allowed to fail. It is built three times,
+> in Java, Python and TypeScript, against one contract.**
+
+```console
+$ curl -s -X POST localhost:8080/api/v1/auth/register -H 'Content-Type: application/json' \
+    -d '{"email":"meera@example.com","password":"correct-horse-42","displayName":"Meera","role":"ADMIN"}'
+{"id":27,"email":"meera@example.com","displayName":"Meera","role":"CUSTOMER", ...}          # role ignored
+$ curl -si -X POST localhost:8080/api/v1/checkout -H "Authorization: Bearer $MEERA" -H 'Idempotency-Key: meera-tap-0001'
+HTTP/1.1 201 Created
+{"id":18,"status":"PENDING_PAYMENT","subtotalPaise":59900,"discountPaise":0,"shippingPaise":4900, ...}
+$ curl -si -X POST localhost:8080/api/v1/checkout -H "Authorization: Bearer $MEERA" -H 'Idempotency-Key: meera-tap-0001'
+HTTP/1.1 200 OK
+idempotent-replayed: true                                                                     # same order, no second charge
+$ curl -si -X POST localhost:8080/api/v1/checkout -H "Authorization: Bearer $RAVI" -H 'Idempotency-Key: ravi-tap-0001'
+HTTP/1.1 409 Conflict
+{"type":"https://shopflow.example/problems/insufficient-stock","title":"Insufficient stock","status":409, ...}
+$ curl -s -X POST localhost:8080/api/v1/payments/webhook -H 'X-Signature: sha256=0000' -d '{"type":"payment.succeeded", ...}'
+{"type":"https://shopflow.example/problems/invalid-signature","title":"Invalid signature","status":401, ...}
+```
+
+**Problem → solution.** Most shop tutorials stop at "add to cart works" and leave out the parts that
+cost real shops real money: floating-point prices, two customers buying the last item, a double tap
+creating two orders, a forged or replayed "payment succeeded", a lost "order paid" message. ShopFlow
+handles each of them on purpose and proves it with tests: money as integer paise with a database
+`CHECK` on the total, a guarded stock decrement inside the checkout transaction, an `Idempotency-Key`
+on checkout, an HMAC-SHA256 signed webhook compared in constant time and de-duplicated by event id, a
+transactional outbox, optimistic locking for product edits, someone else's order `404`, bcrypt and
+short-lived HS256 JWTs with the algorithm pinned. It runs on a laptop with one command and needs no
+API key.
+
+**Architecture.** One stateless API container per track and PostgreSQL as the only stateful component:
+see the diagrams and the order state machine in [`spec/architecture.md`](spec/architecture.md). Three
+decisions worth discussing:
+1. **A guarded decrement instead of locks**: `UPDATE products SET stock = stock - ? WHERE id = ? AND
+   active AND stock >= ?` must affect one row (rows locked in product-id order, so no deadlocks), otherwise the checkout rolls back, plus `CHECK (stock >= 0)` as the
+   last line of defence ([ADR-0002](spec/adr/0002-guarded-stock-decrement.md)).
+2. **Idempotency at both ends of the payment**: a unique `(user, Idempotency-Key)` for checkout and a
+   unique provider event id for webhooks, so retries are harmless in both directions
+   ([ADR-0004](spec/adr/0004-idempotent-checkout-and-webhook-dedup.md)).
+3. **A transactional outbox**: `order.paid` is written in the same transaction as the status change and
+   published afterwards (at least once), so the database and the broker cannot disagree
+   ([ADR-0005](spec/adr/0005-transactional-outbox.md)).
+
+**Security and quality evidence (v1.1.0, measured on the maintainers' Linux build box with Docker).**
+
+| | Java 21 / Spring Boot | Python / FastAPI | TypeScript / Fastify |
+|---|---|---|---|
+| Tests (unit + integration) | 153 unit + 14 integration | 160 unit + 14 integration | 157 unit + 14 integration |
+| Line coverage (gate 85 %) | 96.3 % (JaCoCo) | 97.8 % (coverage.py) | 97.3 % (V8) |
+| Docker smoke test (`scripts/smoke-test.sh`) | 81/81 (+ 84/84 with the LLM unreachable) | 81/81 (+ 84/84) | 81/81 (+ 84/84) |
+
+Each threat in [`spec/requirements.md`](spec/requirements.md) (T1–T11: forged and replayed webhooks,
+double checkout, overselling, `role` mass assignment, order enumeration, price tampering, lost product
+edits, lost events, prompt injection, account enumeration) maps to unit and integration tests, and the
+black-box smoke test re-checks the most important ones against every Docker image. Every phase tag
+(`phase-0-end` … `phase-8-end`) builds and passes the tests of all three tracks
+(`scripts/verify-tags.sh`). CI runs lint, unit and integration tests against a PostgreSQL service
+container, a coverage gate, contract checks and a Docker smoke test per track. Release tags publish
+images to GHCR.
+
+**Operations.** `/health` checks the database. `/metrics` exposes eight Prometheus counters (orders
+placed, checkout replays, duplicate webhooks, expired orders, AI fallbacks, LLM short-circuits, …), and
+every log line is JSON with the request's `X-Request-ID`. v1.1.0 adds a 15-minute payment window so
+abandoned checkouts give their stock back, shipped as an expand-only migration that v1.0.0 also runs
+on. A **game day** made the LLM hang: search assist kept answering through the offline rules and
+checkout was untouched, but in v1.0.0 each assist waited the full 5 s timeout, and in the Python track
+50 concurrent assists slowed even `/health` to 4 s. A circuit breaker fixed it in v1.1.0 (10 assists
+during the fault: avg ≈ 1.5 s, three wait for the timeout and seven answer in milliseconds):
+[post-mortem](docs/postmortem-2026-10-02-llm-hang.md), [runbook](docs/runbook.md).
+
+**How AI was used.** Assistants drafted the starter stubs, Dockerfiles, workflow skeletons, test
+scaffolding, the game-day fake LLM and first versions of docs. Their output needed the strictest review
+exactly where it mattered: money arithmetic, stock checks, signature comparison, hints attached to the
+wrong method, and version-specific framework details. Every suggestion was verified by tests,
+`actionlint`, the smoke test or official documentation, and logged in [`AI_LOG.md`](AI_LOG.md).
+See also [`docs/retrospective.md`](docs/retrospective.md).
+
+**What I'd do next.** A scheduled outbox relay with a real broker; rate limiting on login; a
+hanging-LLM game day in CI with a latency assertion; an async LLM client or a bulkhead in the Python
+track; real payment-provider integration (Razorpay test mode) behind the same webhook contract.
+
+---
+
 ShopFlow is a guided project from **[AiCanCode](https://www.aicancode.org)**. Over 9 phases (about 36
 hours) you build the backend of a small Indian online shop like a professional team would:
 requirements and threats, design, a test-first implementation, CI/CD, containers, observability and a
