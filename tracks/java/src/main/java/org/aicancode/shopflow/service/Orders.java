@@ -1,9 +1,12 @@
 package org.aicancode.shopflow.service;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import org.aicancode.shopflow.domain.ApiException;
 import org.aicancode.shopflow.domain.Models;
+import org.aicancode.shopflow.domain.Models.NewEvent;
 import org.aicancode.shopflow.domain.Models.Order;
 import org.aicancode.shopflow.domain.Models.Transition;
 
@@ -25,9 +28,11 @@ public final class Orders {
     }
 
     public static String nextStatus(String current, String action) {
-        // TODO(phase-3 M5): look up (current, action) in TRANSITIONS; not there -> 409 invalid-transition
-        //   'cannot <action> an order that is <status>'.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): Orders.nextStatus");
+        String target = TRANSITIONS.get(current + ":" + action);
+        if (target == null) {
+            throw ApiException.invalidTransition("cannot " + action + " an order that is " + current);
+        }
+        return target;
     }
 
     public static ApiException concurrentChange() {
@@ -40,9 +45,13 @@ public final class Orders {
 
     /** The status change plus its side effects: restock on cancel, outbox events, refund if it was paid. */
     public static Transition transitionFor(Order order, String action, Instant at) {
-        // TODO(phase-3 M5): next_status + the side effects: an outbox event for the new status
-        //   (EVENT_FOR_STATUS), a refund.requested event when a PAID order is cancelled, and restock when the
-        //   target is CANCELLED.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): Orders.transitionFor");
+        String target = nextStatus(order.status(), action);
+        List<NewEvent> events = new ArrayList<>();
+        events.add(new NewEvent(EVENT_FOR_STATUS.get(target), payload(order, target)));
+        if ("cancel".equals(action) && "PAID".equals(order.status())) {
+            events.add(new NewEvent("refund.requested", payload(order, target)));
+        }
+        return new Transition(order.id(), order.status(), target, at, "CANCELLED".equals(target), List.copyOf(events),
+                null, null, null, null);
     }
 }

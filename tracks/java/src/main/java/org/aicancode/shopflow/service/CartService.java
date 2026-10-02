@@ -2,9 +2,17 @@ package org.aicancode.shopflow.service;
 
 import java.time.Clock;
 import java.util.List;
+import java.util.Locale;
+import org.aicancode.shopflow.domain.ApiException;
 import org.aicancode.shopflow.domain.Models.CartLine;
+import org.aicancode.shopflow.domain.Models.CartState;
 import org.aicancode.shopflow.domain.Models.CartView;
+import org.aicancode.shopflow.domain.Models.Coupon;
 import org.aicancode.shopflow.domain.Models.Principal;
+import org.aicancode.shopflow.domain.Models.Product;
+import org.aicancode.shopflow.domain.Money;
+import org.aicancode.shopflow.domain.Times;
+import org.aicancode.shopflow.domain.Validation;
 import org.aicancode.shopflow.repo.CartRepository;
 import org.aicancode.shopflow.repo.ProductRepository;
 
@@ -23,38 +31,51 @@ public class CartService {
     }
 
     static List<long[]> priced(List<CartLine> lines) {
-        // TODO(phase-3 M4): helper: the cart lines as [unit price in paise, quantity] pairs for
-        //   Money.priceCart (OrderService uses it too).
-        throw new UnsupportedOperationException("TODO(phase-3 M4): CartService.priced");
+        return lines.stream().map(l -> new long[] {l.product().pricePaise(), l.quantity()}).toList();
     }
 
     public CartView view(Principal principal) {
-        // TODO(phase-3 M4): the cart lines + coupon code, priced with price_cart (the coupon may no longer
-        //   apply: then couponApplied is false).
-        throw new UnsupportedOperationException("TODO(phase-3 M4): CartService.view");
+        CartState state = carts.cart(principal.userId());
+        Coupon coupon = state.couponCode() == null ? null : carts.findCoupon(state.couponCode()).orElse(null);
+        return new CartView(state.lines(), state.couponCode(), Money.priceCart(priced(state.lines()), coupon));
     }
 
     public CartView setItem(Principal principal, String sku, Object payload) {
-        // TODO(phase-3 M4): validate quantity; the product must exist and be active (404); quantity > stock
-        //   -> 409 insufficient-stock; a NEW line when the cart already has MAX_LINES lines -> 400; upsert the
-        //   line (it sets the quantity, it does not add) and return the view.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): CartService.setItem");
+        int qty = Validation.quantity(Validation.requireObject(payload).get("quantity"));
+        Product product = products.findProduct(sku.strip().toUpperCase(Locale.ROOT)).orElse(null);
+        if (product == null || !product.active()) {
+            throw ApiException.notFound("product");
+        }
+        if (qty > product.stock()) {
+            throw ApiException.insufficientStock("only " + product.stock() + " left of " + product.sku());
+        }
+        List<CartLine> lines = carts.cart(principal.userId()).lines();
+        if (lines.size() >= MAX_LINES && lines.stream().noneMatch(l -> l.product().id() == product.id())) {
+            throw ApiException.validation("a cart holds at most " + MAX_LINES + " different products");
+        }
+        carts.setCartItem(principal.userId(), product.id(), qty, Times.now(clock));
+        return view(principal);
     }
 
     public CartView removeItem(Principal principal, String sku) {
-        // TODO(phase-3 M4): unknown sku -> 404; removing a line that is not in the cart is fine (idempotent);
-        //   return the view.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): CartService.removeItem");
+        Product product = products.findProduct(sku.strip().toUpperCase(Locale.ROOT))
+                .orElseThrow(() -> ApiException.notFound("product"));
+        carts.removeCartItem(principal.userId(), product.id()); // idempotent: removing twice is fine
+        return view(principal);
     }
 
     public CartView applyCoupon(Principal principal, Object payload) {
-        // TODO(phase-3 M4): validate the code; unknown or inactive coupon -> 404 not-found 'coupon'; store it
-        //   on the cart and return the view.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): CartService.applyCoupon");
+        String code = Validation.couponCode(Validation.requireObject(payload).get("code"));
+        Coupon coupon = carts.findCoupon(code).orElse(null);
+        if (coupon == null || !coupon.active()) {
+            throw ApiException.notFound("coupon");
+        }
+        carts.setCoupon(principal.userId(), code, Times.now(clock));
+        return view(principal);
     }
 
     public CartView removeCoupon(Principal principal) {
-        // TODO(phase-3 M4): clear the cart's coupon and return the view.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): CartService.removeCoupon");
+        carts.setCoupon(principal.userId(), null, Times.now(clock));
+        return view(principal);
     }
 }

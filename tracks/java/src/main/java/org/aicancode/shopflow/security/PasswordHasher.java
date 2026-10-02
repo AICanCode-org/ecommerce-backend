@@ -18,14 +18,15 @@ public class PasswordHasher {
     }
 
     public String hash(String password) {
-        // TODO(phase-3 M2): bcrypt with the configured cost (4 in tests, 10 in production).
-        throw new UnsupportedOperationException("TODO(phase-3 M2): PasswordHasher.hash");
+        return encoder.encode(password);
     }
 
     public boolean verify(String password, String passwordHash) {
-        // TODO(phase-3 M2): bcrypt check; when password_hash is null (unknown e-mail) verify against the
-        //   dummy hash anyway and return false: same timing either way. A malformed hash -> false, never an
-        //   exception.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): PasswordHasher.verify");
+        try {
+            boolean ok = encoder.matches(password, passwordHash == null ? dummy : passwordHash);
+            return ok && passwordHash != null;
+        } catch (IllegalArgumentException e) {
+            return false; // a malformed hash never matches
+        }
     }
 }

@@ -25,8 +25,14 @@ public class DescriptionService {
     }
 
     public Draft draft(Product product, List<String> keywords) {
-        // TODO(phase-3 M3): LLM if configured; ANY exception -> template with fallback=true (log a warning).
-        //   No LLM -> template, fallback=false.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): DescriptionService.draft");
+        if (llm != null) {
+            try {
+                return new Draft("llm", false, llm.write(product, keywords));
+            } catch (Exception e) { // any LLM failure -> graceful fallback
+                LOG.warn("LLM description failed, using the template: {}", e.toString());
+                return new Draft("template", true, template.write(product, keywords));
+            }
+        }
+        return new Draft("template", false, template.write(product, keywords));
     }
 }

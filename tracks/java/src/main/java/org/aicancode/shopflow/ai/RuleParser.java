@@ -1,7 +1,9 @@
 package org.aicancode.shopflow.ai;
 
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -42,17 +44,65 @@ public class RuleParser implements Parser {
 
     /** "shoe" and "shoes" both match the category "shoes"; "bags" matches "bag". */
     public static String matchCategory(String token, List<String> categories) {
-        // TODO(phase-3 M3): 'shoe' and 'shoes' both match the category 'shoes'; 'bags' matches 'bag': token
-        //   == c, token + 's' == c, or token minus a trailing 's' == c.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RuleParser.matchCategory");
+        for (String c : categories) {
+            if (token.equals(c) || (token + "s").equals(c)
+                    || (token.endsWith("s") && token.substring(0, token.length() - 1).equals(c))) {
+                return c;
+            }
+        }
+        return null;
     }
 
     @Override
     public SearchFilters parse(String query, List<String> categories) {
-        // TODO(phase-3 M3): deterministic, the order is part of the spec: lower-case, drop ₹ and thousands
-        //   separators and money words, '3k' -> 3000; then between/range, under/max, over/min (whole rupees ->
-        //   paise, capped at MAX_RUPEES), 'in stock'; the first token that matches a category is the category;
-        //   other tokens (not stopwords, not numbers, unique, <= 30 chars) are terms, at most MAX_TERMS.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RuleParser.parse");
+        String text = query.toLowerCase(Locale.ROOT).replace("₹", " ");
+        text = THOUSANDS.matcher(text).replaceAll("");
+        text = MONEY_WORDS.matcher(text).replaceAll(" ");
+        text = K.matcher(text).replaceAll(m -> number(m.group(1)).multiply(BigInteger.valueOf(1000)).toString());
+        Long lo = null;
+        Long hi = null;
+        Matcher m = BETWEEN.matcher(text);
+        if (!m.find()) {
+            m = RANGE.matcher(text);
+            m = m.find() ? m : null;
+        }
+        if (m != null) {
+            BigInteger a = number(m.group(1));
+            BigInteger b = number(m.group(2));
+            lo = paise(a.min(b));
+            hi = paise(a.max(b));
+            text = cut(text, m);
+        }
+        m = MAX.matcher(text);
+        if (m.find()) {
+            hi = paise(number(m.group(1)));
+            text = cut(text, m);
+        }
+        m = MIN.matcher(text);
+        if (m.find()) {
+            lo = paise(number(m.group(1)));
+            text = cut(text, m);
+        }
+        Boolean inStock = null;
+        m = IN_STOCK.matcher(text);
+        if (m.find()) {
+            inStock = true;
+            text = cut(text, m);
+        }
+        String category = null;
+        List<String> terms = new ArrayList<>();
+        Matcher tokens = TOKEN.matcher(text);
+        while (tokens.find()) {
+            String token = tokens.group();
+            String found = category == null ? matchCategory(token, categories) : null;
+            if (found != null) {
+                category = found;
+            } else if (!STOPWORDS.contains(token) && !DIGITS.matcher(token).matches() && !terms.contains(token)
+                    && token.length() <= 30) {
+                terms.add(token);
+            }
+        }
+        return new SearchFilters(List.copyOf(terms.subList(0, Math.min(terms.size(), MAX_TERMS))), category, lo, hi,
+                inStock);
     }
 }

@@ -4,15 +4,22 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.aicancode.shopflow.domain.DuplicateException;
+import org.aicancode.shopflow.domain.InsufficientStockException;
+import org.aicancode.shopflow.domain.Models;
+import org.aicancode.shopflow.domain.Models.NewEvent;
 import org.aicancode.shopflow.domain.Models.Order;
 import org.aicancode.shopflow.domain.Models.OrderDraft;
 import org.aicancode.shopflow.domain.Models.OrderLine;
 import org.aicancode.shopflow.domain.Models.OutboxEvent;
 import org.aicancode.shopflow.domain.Models.Payment;
+import org.aicancode.shopflow.domain.Models.Pricing;
 import org.aicancode.shopflow.domain.Models.Transition;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.core.type.TypeReference;
@@ -69,66 +76,151 @@ public class JdbcOrderRepository implements OrderRepository {
 
     @Override
     public Optional<Order> findOrderByKey(long userId, String key) {
-        // TODO(phase-3 M5): the order with this (user id, idempotency key), or null.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.findOrderByKey");
+        return jdbc.sql(ORDER_SELECT + "WHERE o.user_id = ? AND o.idempotency_key = ?").params(userId, key)
+                .query(JdbcOrderRepository::order).optional();
     }
 
     @Override
     public Order placeOrder(OrderDraft d) {
-        // TODO(phase-3 M5): ONE transaction: for every line a GUARDED stock decrement (WHERE id = ? AND
-        //   active AND stock >= qty; 0 rows -> InsufficientStock + rollback), INSERT the order (unique (user,
-        //   key) -> DuplicateError), its lines, the PENDING payment, an order.placed outbox event, and empty
-        //   the cart.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.placeOrder");
+        try {
+            return tx.execute(status -> {
+                // Lock rows in a fixed order (product id) so two checkouts can never deadlock.
+                List<OrderLine> sorted = d.lines().stream().sorted(Comparator.comparingLong(OrderLine::productId)).toList();
+                for (OrderLine line : sorted) {
+                    int changed = jdbc.sql("UPDATE products SET stock = stock - ?, updated_at = ? "
+                                    + "WHERE id = ? AND active AND stock >= ?")
+                            .params(line.quantity(), Jdbc.ts(d.at()), line.productId(), line.quantity()).update();
+                    if (changed != 1) {
+                        throw new InsufficientStockException(line.sku()); // rolls back the whole transaction
+                    }
+                }
+                Pricing p = d.pricing();
+                long orderId = jdbc.sql("INSERT INTO orders (user_id, status, subtotal_paise, discount_paise, "
+                                + "shipping_paise, total_paise, coupon_code, idempotency_key, created_at, updated_at) "
+                                + "VALUES (?, 'PENDING_PAYMENT', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+                        .params(d.userId(), p.subtotalPaise(), p.discountPaise(), p.shippingPaise(), p.totalPaise(),
+                                d.couponCode(), d.idempotencyKey(), Jdbc.ts(d.at()), Jdbc.ts(d.at()))
+                        .query(Long.class).single();
+                int n = 0;
+                for (OrderLine line : d.lines()) {
+                    jdbc.sql("INSERT INTO order_items (order_id, line_no, product_id, sku, name, unit_price_paise, "
+                                    + "quantity) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                            .params(orderId, ++n, line.productId(), line.sku(), line.name(), line.unitPricePaise(),
+                                    line.quantity())
+                            .update();
+                }
+                jdbc.sql("INSERT INTO payments (id, order_id, provider, status, amount_paise, created_at, updated_at) "
+                                + "VALUES (?, ?, ?, 'PENDING', ?, ?, ?)")
+                        .params(d.paymentId(), orderId, PAYMENT_PROVIDER, p.totalPaise(), Jdbc.ts(d.at()), Jdbc.ts(d.at()))
+                        .update();
+                jdbc.sql("INSERT INTO outbox_events (type, order_id, payload, created_at) "
+                                + "VALUES ('order.placed', ?, ?::jsonb, ?)")
+                        .params(orderId, Jdbc.json(Models.orderEventPayload(d.userId(), orderId, "PENDING_PAYMENT",
+                                p.totalPaise())), Jdbc.ts(d.at()))
+                        .update();
+                jdbc.sql("DELETE FROM cart_items WHERE user_id = ?").param(d.userId()).update();
+                jdbc.sql("UPDATE carts SET coupon_code = NULL, updated_at = ? WHERE user_id = ?")
+                        .params(Jdbc.ts(d.at()), d.userId()).update();
+                return findOrder(orderId).orElseThrow();
+            });
+        } catch (DuplicateKeyException e) {
+            throw new DuplicateException("idempotency_key");
+        }
     }
 
     @Override
     public Optional<Order> findOrder(long id) {
-        // TODO(phase-3 M5): the order by id with its lines, or null.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.findOrder");
+        return jdbc.sql(ORDER_SELECT + "WHERE o.id = ?").param(id).query(JdbcOrderRepository::order).optional();
     }
 
     @Override
     public List<Order> ordersForUser(long userId, int limit) {
-        // TODO(phase-3 M5): the user's orders, newest first (ORDER BY id DESC), LIMIT n.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.ordersForUser");
+        return jdbc.sql(ORDER_SELECT + "WHERE o.user_id = ? ORDER BY o.id DESC LIMIT ?").params(userId, limit)
+                .query(JdbcOrderRepository::order).list();
     }
 
     @Override
     public List<Order> ordersByStatus(String status, int limit) {
-        // TODO(phase-3 M5): all orders [with this status], newest first, LIMIT n.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.ordersByStatus");
+        if (status == null) {
+            return jdbc.sql(ORDER_SELECT + "ORDER BY o.id DESC LIMIT ?").param(limit).query(JdbcOrderRepository::order).list();
+        }
+        return jdbc.sql(ORDER_SELECT + "WHERE o.status = ? ORDER BY o.id DESC LIMIT ?").params(status, limit)
+                .query(JdbcOrderRepository::order).list();
     }
 
     @Override
     public Optional<Payment> findPayment(String paymentId) {
-        // TODO(phase-3 M5): the payment by its provider id, or null.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.findPayment");
+        return jdbc.sql("SELECT id, order_id, provider, status, amount_paise, created_at, updated_at FROM payments "
+                        + "WHERE id = ?").param(paymentId)
+                .query((rs, row) -> new Payment(rs.getString("id"), rs.getLong("order_id"), rs.getString("provider"),
+                        rs.getString("status"), rs.getLong("amount_paise"), Jdbc.instant(rs, "created_at"),
+                        Jdbc.instant(rs, "updated_at")))
+                .optional();
     }
 
     @Override
     public boolean hasPaymentEvent(String eventId) {
-        // TODO(phase-3 M5): true when this webhook event id was already recorded.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.hasPaymentEvent");
+        return jdbc.sql("SELECT 1 FROM payment_events WHERE event_id = ?").param(eventId).query(Integer.class)
+                .optional().isPresent();
     }
 
     @Override
     public String applyTransition(Transition t) {
-        // TODO(phase-3 M5): ONE transaction: record the webhook event if any (unique id -> 'duplicate'),
-        //   compare-and-set the order status (UPDATE ... WHERE id AND status = from; 0 rows -> 'conflict' +
-        //   rollback), update the payment, restock, insert the outbox events. 'ok' when it all committed.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.applyTransition");
+        try {
+            tx.executeWithoutResult(status -> {
+                if (t.webhookEventId() != null) {
+                    int inserted = jdbc.sql("INSERT INTO payment_events (event_id, payment_id, type, received_at) "
+                                    + "VALUES (?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING")
+                            .params(t.webhookEventId(), t.paymentId(), t.webhookEventType(), Jdbc.ts(t.at())).update();
+                    if (inserted == 0) {
+                        throw new Abort("duplicate");
+                    }
+                }
+                if (t.paymentStatus() != null) {
+                    int changed = jdbc.sql("UPDATE payments SET status = ?, updated_at = ? WHERE id = ? AND status = 'PENDING'")
+                            .params(t.paymentStatus(), Jdbc.ts(t.at()), t.paymentId()).update();
+                    if (changed != 1) {
+                        throw new Abort("conflict");
+                    }
+                }
+                if (t.toStatus() != null) {
+                    // Compare-and-set on the status: two admins (or an admin and a webhook) cannot both win.
+                    int changed = jdbc.sql("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                            .params(t.toStatus(), Jdbc.ts(t.at()), t.orderId(), t.fromStatus()).update();
+                    if (changed != 1) {
+                        throw new Abort("conflict");
+                    }
+                }
+                if (t.restock()) {
+                    jdbc.sql("UPDATE products p SET stock = p.stock + i.quantity, updated_at = ? "
+                                    + "FROM order_items i WHERE i.order_id = ? AND p.id = i.product_id")
+                            .params(Jdbc.ts(t.at()), t.orderId()).update();
+                }
+                for (NewEvent e : t.events()) {
+                    jdbc.sql("INSERT INTO outbox_events (type, order_id, payload, created_at) VALUES (?, ?, ?::jsonb, ?)")
+                            .params(e.type(), t.orderId(), Jdbc.json(e.payload()), Jdbc.ts(t.at())).update();
+                }
+            });
+        } catch (Abort a) {
+            return a.result;
+        }
+        return "ok";
     }
 
     @Override
     public List<OutboxEvent> outbox(boolean pendingOnly, int limit) {
-        // TODO(phase-3 M5): outbox events [only unpublished] ORDER BY id LIMIT n.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.outbox");
+        String where = pendingOnly ? "WHERE published_at IS NULL " : "";
+        return jdbc.sql("SELECT id, type, order_id, payload::text AS payload, created_at, published_at FROM outbox_events "
+                        + where + "ORDER BY id LIMIT ?").param(limit)
+                .query((rs, row) -> new OutboxEvent(rs.getLong("id"), rs.getString("type"), rs.getLong("order_id"),
+                        Jdbc.map(rs.getString("payload")), Jdbc.instant(rs, "created_at"),
+                        Jdbc.instant(rs, "published_at")))
+                .list();
     }
 
     @Override
     public void markPublished(long eventId, Instant at) {
-        // TODO(phase-3 M5): set published_at on the event (only if it is still null).
-        throw new UnsupportedOperationException("TODO(phase-3 M5): JdbcOrderRepository.markPublished");
+        jdbc.sql("UPDATE outbox_events SET published_at = ? WHERE id = ? AND published_at IS NULL")
+                .params(Jdbc.ts(at), eventId).update();
     }
 }

@@ -1,19 +1,24 @@
 package org.aicancode.shopflow.service;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Map;
+import org.aicancode.shopflow.domain.ApiException;
+import org.aicancode.shopflow.domain.DuplicateException;
 import org.aicancode.shopflow.domain.Models.LoginResult;
 import org.aicancode.shopflow.domain.Models.Principal;
 import org.aicancode.shopflow.domain.Models.User;
+import org.aicancode.shopflow.domain.Times;
+import org.aicancode.shopflow.domain.Validation;
 import org.aicancode.shopflow.repo.UserRepository;
 import org.aicancode.shopflow.security.PasswordHasher;
 import org.aicancode.shopflow.security.TokenService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /** Accounts, login and roles. Framework-free: the HTTP layer only parses and formats. */
 public class AuthService {
 
-    private static final Logger LOG = LoggerFactory.getLogger(AuthService.class);
     private final UserRepository users;
     private final PasswordHasher hasher;
     private final TokenService tokens;
@@ -31,46 +36,73 @@ public class AuthService {
     }
 
     public static void requireRole(Principal principal, String... roles) {
-        // TODO(phase-3 M2): 403 forbidden 'requires role X' unless principal.role is one of the given roles.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): AuthService.requireRole");
+        if (!Arrays.asList(roles).contains(principal.role())) {
+            throw ApiException.forbidden("requires role " + String.join(" or ", roles));
+        }
     }
 
     public User register(Object payload) {
-        // TODO(phase-3 M2): validate email, password, displayName; ALWAYS create a CUSTOMER (ignore any
-        //   'role' in the payload: mass assignment!); hash the password; DuplicateError -> 409 email-taken.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): AuthService.register");
+        Map<String, Object> data = Validation.requireObject(payload);
+        String email = Validation.email(data.get("email"));
+        String password = Validation.password(data.get("password"));
+        String name = Validation.displayName(data.get("displayName"));
+        // Never read "role" from the request: everyone starts as CUSTOMER (mass-assignment defence).
+        try {
+            return users.insertUser(email, hasher.hash(password), name, "CUSTOMER", Times.now(clock));
+        } catch (DuplicateException e) {
+            throw ApiException.emailTaken();
+        }
     }
 
     public LoginResult login(Object payload) {
-        // TODO(phase-3 M2): email and password must be strings (400); the SAME 401 invalid-credentials for an
-        //   unknown e-mail and a wrong password, and still run one bcrypt verify for an unknown e-mail
-        //   (timing). Passwords over 72 bytes are a 401 too. Returns the access token + the user.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): AuthService.login");
+        Map<String, Object> data = Validation.requireObject(payload);
+        if (!(data.get("email") instanceof String email) || !(data.get("password") instanceof String password)) {
+            throw ApiException.validation("email and password are required");
+        }
+        User user = users.findUserByEmail(email.strip().toLowerCase(Locale.ROOT)).orElse(null);
+        // verify() also runs for unknown e-mails (against a dummy hash): same answer, same timing.
+        boolean ok = password.getBytes(StandardCharsets.UTF_8).length <= 72
+                && hasher.verify(password, user == null ? null : user.passwordHash());
+        if (!ok || user == null) {
+            throw ApiException.invalidCredentials();
+        }
+        return new LoginResult(tokens.issueAccessToken(user), user);
     }
 
     public User me(Principal principal) {
-        // TODO(phase-3 M2): the current user; 401 unauthorized 'account no longer exists' if it was removed.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): AuthService.me");
+        return users.findUser(principal.userId())
+                .orElseThrow(() -> ApiException.unauthorized("account no longer exists"));
     }
 
     /** Start-up bootstrap from ADMIN_EMAIL / ADMIN_PASSWORD (there is no other way to get an ADMIN). */
     public User ensureAdmin(String rawEmail, String password) {
-        // TODO(phase-3 M2): create ADMIN_EMAIL as an ADMIN, or promote it if it exists. Until you build it
-        //   the app starts without an admin.
-        LOG.warn("TODO(phase-3 M2): ensureAdmin - starting without an admin");
-        return null;
+        String email = Validation.email(rawEmail);
+        User existing = users.findUserByEmail(email).orElse(null);
+        if (existing != null) {
+            return "ADMIN".equals(existing.role()) ? existing : users.updateRole(existing.id(), "ADMIN").orElseThrow();
+        }
+        return users.insertUser(email, hasher.hash(Validation.password(password)), "Admin", "ADMIN", Times.now(clock));
     }
 
     public Principal authenticate(String authorization) {
-        // TODO(phase-3 M2): optional(header), but null -> 401 unauthorized (the HTTP layer adds WWW-
-        //   Authenticate).
-        throw new UnsupportedOperationException("TODO(phase-3 M2): AuthService.authenticate");
+        Principal principal = optional(authorization);
+        if (principal == null) {
+            throw ApiException.unauthorized();
+        }
+        return principal;
     }
 
     /** No header -> anonymous. A header that is present but wrong is always a 401, never anonymous. */
     public Principal optional(String authorization) {
-        // TODO(phase-3 M2): no header -> null (anonymous). 'Bearer <jwt>' -> verify it. A header that is
-        //   present but bad is ALWAYS a 401, never silently anonymous.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): AuthService.optional");
+        if (authorization == null) {
+            return null;
+        }
+        int space = authorization.indexOf(' ');
+        String scheme = space < 0 ? authorization : authorization.substring(0, space);
+        String token = space < 0 ? "" : authorization.substring(space + 1).strip();
+        if (!"bearer".equals(scheme.toLowerCase(Locale.ROOT)) || token.isEmpty()) {
+            throw ApiException.unauthorized("use Authorization: Bearer <token>");
+        }
+        return tokens.verifyAccessToken(token);
     }
 }

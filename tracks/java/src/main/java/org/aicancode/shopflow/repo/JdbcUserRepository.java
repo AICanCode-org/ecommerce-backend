@@ -4,7 +4,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Optional;
+import org.aicancode.shopflow.domain.DuplicateException;
 import org.aicancode.shopflow.domain.Models.User;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /** PostgreSQL adapter for users (plain SQL with JdbcClient, no ORM). */
@@ -24,27 +26,31 @@ public class JdbcUserRepository implements UserRepository {
 
     @Override
     public User insertUser(String email, String passwordHash, String displayName, String role, Instant at) {
-        // TODO(phase-3 M2): INSERT ... RETURNING; a unique violation on email (SQLSTATE 23505) ->
-        //   DuplicateError.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): JdbcUserRepository.insertUser");
+        try {
+            return jdbc.sql("INSERT INTO users (email, password_hash, display_name, role, created_at) "
+                            + "VALUES (?, ?, ?, ?, ?) RETURNING " + COLS)
+                    .params(email, passwordHash, displayName, role, Jdbc.ts(at))
+                    .query(JdbcUserRepository::user).single();
+        } catch (DuplicateKeyException e) {
+            throw new DuplicateException("email");
+        }
     }
 
     @Override
     public Optional<User> findUserByEmail(String email) {
-        // TODO(phase-3 M2): SELECT by email (already lower-cased).
-        throw new UnsupportedOperationException("TODO(phase-3 M2): JdbcUserRepository.findUserByEmail");
+        return jdbc.sql("SELECT " + COLS + " FROM users WHERE email = ?").param(email)
+                .query(JdbcUserRepository::user).optional();
     }
 
     @Override
     public Optional<User> findUser(long id) {
-        // TODO(phase-3 M2): SELECT by id.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): JdbcUserRepository.findUser");
+        return jdbc.sql("SELECT " + COLS + " FROM users WHERE id = ?").param(id).query(JdbcUserRepository::user).optional();
     }
 
     @Override
     public Optional<User> updateRole(long id, String role) {
-        // TODO(phase-3 M2): UPDATE ... RETURNING; null when the user does not exist.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): JdbcUserRepository.updateRole");
+        return jdbc.sql("UPDATE users SET role = ? WHERE id = ? RETURNING " + COLS).params(role, id)
+                .query(JdbcUserRepository::user).optional();
     }
 
     @Override

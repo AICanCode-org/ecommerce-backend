@@ -1,6 +1,11 @@
 package org.aicancode.shopflow.domain;
 
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -35,8 +40,7 @@ public final class Validation {
 
     /** A string of ASCII digits as a number, capped so that it never overflows. */
     public static long digits(String value) {
-        // TODO(phase-3 M1): helper: an ASCII-digits-only query string as a long, or null when it is not one.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.digits");
+        return new BigInteger(value).min(BigInteger.valueOf(Long.MAX_VALUE)).longValue();
     }
 
     private static boolean isDigits(String value) {
@@ -53,158 +57,307 @@ public final class Validation {
 
     // ---- accounts ----
     public static String email(Object value) {
-        // TODO(phase-3 M1): a string (400 'email is required'); trim + lower-case; must match EMAIL_RE and be
-        //   at most 254 characters (400 'email is invalid').
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.email");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("email is required");
+        }
+        String clean = s.strip().toLowerCase(Locale.ROOT);
+        if (Text.chars(clean) > 254 || !EMAIL.matcher(clean).matches()) {
+            throw ApiException.validation("email is invalid");
+        }
+        return clean;
     }
 
     public static String password(Object value) {
-        // TODO(phase-3 M1): a string of at least 8 characters and at most 72 BYTES in UTF-8 (bcrypt ignores
-        //   the rest): 400 otherwise.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.password");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("password is required");
+        }
+        if (Text.chars(s) < 8) {
+            throw ApiException.validation("password must be at least 8 characters");
+        }
+        if (s.getBytes(StandardCharsets.UTF_8).length > 72) {
+            throw ApiException.validation("password must be at most 72 bytes");
+        }
+        return s;
     }
 
     public static String displayName(Object value) {
-        // TODO(phase-3 M1): a string, trimmed, 1-50 characters (count code points, not UTF-16 units).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.displayName");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("displayName is required");
+        }
+        String clean = s.strip();
+        if (clean.isEmpty() || Text.chars(clean) > 50) {
+            throw ApiException.validation("displayName must be 1-50 characters");
+        }
+        return clean;
     }
 
     // ---- catalog ----
     public static String sku(Object value) {
-        // TODO(phase-3 M1): a string, trimmed and UPPER-cased, matching SKU_RE (3-32 characters: A-Z, 0-9 and
-        //   -).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.sku");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("sku is required");
+        }
+        String clean = s.strip().toUpperCase(Locale.ROOT);
+        if (!SKU.matcher(clean).matches()) {
+            throw ApiException.validation("sku must be 3-32 characters: A-Z, 0-9 and -");
+        }
+        return clean;
     }
 
     public static String productName(Object value) {
-        // TODO(phase-3 M1): a string, trimmed, 1-120 characters.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.productName");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("name is required");
+        }
+        String clean = s.strip();
+        if (clean.isEmpty() || Text.chars(clean) > 120) {
+            throw ApiException.validation("name must be 1-120 characters");
+        }
+        return clean;
     }
 
     public static String description(Object value) {
-        // TODO(phase-3 M1): optional: null/missing -> empty string; otherwise a string (trimmed) of at most
-        //   2000 characters.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.description");
+        if (value == null) {
+            return "";
+        }
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("description must be a string");
+        }
+        String clean = s.strip();
+        if (Text.chars(clean) > 2000) {
+            throw ApiException.validation("description must be at most 2000 characters");
+        }
+        return clean;
     }
 
     public static String category(Object value) {
-        // TODO(phase-3 M1): a string, trimmed and lower-cased, matching CATEGORY_RE (2-30 characters: a-z,
-        //   0-9 and -).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.category");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("category is required");
+        }
+        String clean = s.strip().toLowerCase(Locale.ROOT);
+        if (!CATEGORY.matcher(clean).matches()) {
+            throw ApiException.validation("category must be 2-30 characters: a-z, 0-9 and -");
+        }
+        return clean;
     }
 
     public static long pricePaise(Object value) {
-        // TODO(phase-3 M1): an INTEGER (not a float, not a boolean, not a string) between 1 and
-        //   MAX_PRICE_PAISE. Money is always integer paise (ADR-0001).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.pricePaise");
+        Long n = integer(value);
+        if (n == null || n < 1 || n > MAX_PRICE_PAISE) {
+            throw ApiException.validation("pricePaise must be an integer between 1 and " + MAX_PRICE_PAISE);
+        }
+        return n;
     }
 
     public static int stock(Object value) {
-        // TODO(phase-3 M1): an integer between 0 and MAX_STOCK (booleans are not integers).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.stock");
+        if (value == null) {
+            return 0;
+        }
+        Long n = integer(value);
+        if (n == null || n < 0 || n > MAX_STOCK) {
+            throw ApiException.validation("stock must be an integer between 0 and " + MAX_STOCK);
+        }
+        return n.intValue();
     }
 
     public static int stockDelta(Object value) {
-        // TODO(phase-3 M1): a non-zero integer between -MAX_STOCK and MAX_STOCK.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.stockDelta");
+        Long n = integer(value);
+        if (n == null || n == 0 || Math.abs(n) > MAX_STOCK) {
+            throw ApiException.validation("delta must be a non-zero integer between -" + MAX_STOCK + " and " + MAX_STOCK);
+        }
+        return n.intValue();
     }
 
     public static boolean active(Object value) {
-        // TODO(phase-3 M1): a real boolean: true or false, nothing else.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.active");
+        if (!(value instanceof Boolean b)) {
+            throw ApiException.validation("active must be true or false");
+        }
+        return b;
     }
 
     public static int version(Object value) {
-        // TODO(phase-3 M1): a positive integer (the version you read; optimistic locking, ADR-0003).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.version");
+        Long n = integer(value);
+        if (n == null || n < 1 || n > Integer.MAX_VALUE) {
+            throw ApiException.validation("version must be a positive integer");
+        }
+        return n.intValue();
     }
 
     /** Optional hints for an AI description draft: at most 5, each 1-30 characters, de-duplicated. */
     public static List<String> keywords(Object value) {
-        // TODO(phase-3 M1): optional list (missing -> []); at most 5 strings, each lower-cased + trimmed and
-        //   matching KEYWORD_RE; drop duplicates, keep the order.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.keywords");
+        String message = "keywords must be a list of at most 5 words (1-30 characters each)";
+        if (value == null) {
+            return List.of();
+        }
+        if (!(value instanceof List<?> list)) {
+            throw ApiException.validation(message);
+        }
+        List<String> out = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof String s)) {
+                throw ApiException.validation(message);
+            }
+            String clean = Text.collapse(s.toLowerCase(Locale.ROOT));
+            if (!KEYWORD.matcher(clean).matches()) {
+                throw ApiException.validation(message);
+            }
+            if (!out.contains(clean)) {
+                out.add(clean);
+            }
+        }
+        if (out.size() > 5) {
+            throw ApiException.validation(message);
+        }
+        return List.copyOf(out);
     }
 
     // ---- cart + checkout ----
     public static int quantity(Object value) {
-        // TODO(phase-3 M1): an integer between 1 and MAX_QUANTITY (10).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.quantity");
+        Long n = integer(value);
+        if (n == null || n < 1 || n > MAX_QUANTITY) {
+            throw ApiException.validation("quantity must be an integer between 1 and " + MAX_QUANTITY);
+        }
+        return n.intValue();
     }
 
     public static String couponCode(Object value) {
-        // TODO(phase-3 M1): a string (400 'code is required'), trimmed + UPPER-cased, matching COUPON_RE (400
-        //   'code is invalid').
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.couponCode");
+        if (!(value instanceof String s)) {
+            throw ApiException.validation("code is required");
+        }
+        String clean = s.strip().toUpperCase(Locale.ROOT);
+        if (!COUPON.matcher(clean).matches()) {
+            throw ApiException.validation("code is invalid");
+        }
+        return clean;
     }
 
     public static String idempotencyKey(String value) {
-        // TODO(phase-3 M1): the Idempotency-Key header: missing/blank -> 400 'Idempotency-Key header is
-        //   required'; must match IDEMPOTENCY_KEY_RE (8-64 characters).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.idempotencyKey");
+        if (value == null || value.isEmpty()) {
+            throw ApiException.validation("Idempotency-Key header is required");
+        }
+        if (!IDEMPOTENCY_KEY.matcher(value).matches()) {
+            throw ApiException.validation("Idempotency-Key must be 8-64 characters: A-Z, a-z, 0-9, _ and -");
+        }
+        return value;
     }
 
     public static String orderStatusTarget(Object value) {
-        // TODO(phase-3 M1): only SHIPPED or DELIVERED can be set by an admin (cancel has its own endpoint,
-        //   PAID comes from the webhook).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.orderStatusTarget");
+        if (!"SHIPPED".equals(value) && !"DELIVERED".equals(value)) {
+            throw ApiException.validation("status must be SHIPPED or DELIVERED");
+        }
+        return (String) value;
     }
 
     // ---- query strings ----
     public static int limit(String value) {
-        // TODO(phase-3 M1): a query string: missing -> the default (20); ASCII digits only, 1..maximum (50);
-        //   anything else 400.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.limit");
+        if (value == null) {
+            return DEFAULT_LIMIT;
+        }
+        if (!isDigits(value) || digits(value) < 1 || digits(value) > MAX_LIMIT) {
+            throw ApiException.validation("limit must be an integer between 1 and " + MAX_LIMIT);
+        }
+        return (int) digits(value);
     }
 
     public static Long priceFilter(String value, String name) {
-        // TODO(phase-3 M1): a query string: missing -> null; ASCII digits only, 0..MAX_PRICE_PAISE, else 400
-        //   naming the parameter.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.priceFilter");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!isDigits(value) || digits(value) > MAX_PRICE_PAISE) {
+            throw ApiException.validation(name + " must be an integer between 0 and " + MAX_PRICE_PAISE + " (paise)");
+        }
+        return digits(value);
     }
 
     public static Boolean boolFilter(String value, String name) {
-        // TODO(phase-3 M1): a query string: missing -> null; exactly 'true' or 'false', else 400 naming the
-        //   parameter.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.boolFilter");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!"true".equals(value) && !"false".equals(value)) {
+            throw ApiException.validation(name + " must be true or false");
+        }
+        return "true".equals(value);
     }
 
     public static String searchQuery(String value) {
-        // TODO(phase-3 M1): missing or blank -> null; trimmed, at most 100 characters.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.searchQuery");
+        if (value == null) {
+            return null;
+        }
+        String clean = value.strip();
+        if (clean.isEmpty()) {
+            return null;
+        }
+        if (Text.chars(clean) > 100) {
+            throw ApiException.validation("q must be at most 100 characters");
+        }
+        return clean;
     }
 
     public static String assistQuery(String value) {
-        // TODO(phase-3 M1): required (400 'q is required'), trimmed, at most 200 characters.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.assistQuery");
+        String clean = value == null ? "" : value.strip();
+        if (clean.isEmpty()) {
+            throw ApiException.validation("q is required");
+        }
+        if (Text.chars(clean) > 200) {
+            throw ApiException.validation("q must be at most 200 characters");
+        }
+        return clean;
     }
 
     public static String categoryFilter(String value) {
-        // TODO(phase-3 M1): missing -> null; lower-cased, must match CATEGORY_RE.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.categoryFilter");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        String clean = value.toLowerCase(Locale.ROOT);
+        if (!CATEGORY.matcher(clean).matches()) {
+            throw ApiException.validation("category is invalid");
+        }
+        return clean;
     }
 
     public static String orderStatusFilter(String value) {
-        // TODO(phase-3 M1): missing -> null; upper-cased, one of ORDER_STATUSES.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.orderStatusFilter");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!Models.ORDER_STATUSES.contains(value)) {
+            throw ApiException.validation("status must be one of " + String.join(", ", Models.ORDER_STATUSES));
+        }
+        return value;
     }
 
     /** An id that cannot exist is a 404, not a 400: /orders/abc is simply not there. */
     public static long pathId(String value, String what) {
-        // TODO(phase-3 M1): a path segment: ASCII digits only and a positive id that fits in 63 bits;
-        //   anything else is 404 for 'what' (not 400: /orders/abc simply does not exist).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.pathId");
+        if (value == null || !isDigits(value) || value.length() > 18) {
+            throw ApiException.notFound(what);
+        }
+        return Long.parseLong(value);
     }
 
     // ---- keyset cursor (opaque to clients) ----
     public static String encodeCursor(long lastId) {
-        // TODO(phase-3 M3): opaque cursor: base64url (no padding) of 'p' + the last id shown.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): Validation.encodeCursor");
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(("p" + lastId).getBytes(StandardCharsets.US_ASCII));
     }
 
     public static Long decodeCursor(String value) {
-        // TODO(phase-3 M3): missing -> null; must match CURSOR_RE, decode base64url, be 'p' + digits with a
-        //   positive id; anything else 400 'cursor is invalid'.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): Validation.decodeCursor");
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        if (!CURSOR.matcher(value).matches()) {
+            throw ApiException.validation("cursor is invalid");
+        }
+        byte[] raw;
+        try {
+            raw = Base64.getUrlDecoder().decode(value + "=".repeat((4 - value.length() % 4) % 4));
+        } catch (IllegalArgumentException e) {
+            throw ApiException.validation("cursor is invalid");
+        }
+        for (byte b : raw) {
+            if (b < 0) {
+                throw ApiException.validation("cursor is invalid"); // not ASCII
+            }
+        }
+        String text = new String(raw, StandardCharsets.US_ASCII);
+        if (!text.startsWith("p") || !isDigits(text.substring(1)) || text.length() > 19) {
+            throw ApiException.validation("cursor is invalid");
+        }
+        return Long.parseLong(text.substring(1));
     }
 }

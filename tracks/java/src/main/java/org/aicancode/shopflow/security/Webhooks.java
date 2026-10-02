@@ -1,7 +1,13 @@
 package org.aicancode.shopflow.security;
 
+import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.HexFormat;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /** Webhook signatures (HMAC-SHA256 of the RAW body) and payment ids. */
 public final class Webhooks {
@@ -14,16 +20,22 @@ public final class Webhooks {
 
     /** The value of the X-Signature header: "sha256=" + hex HMAC-SHA256 of the RAW request body. */
     public static String sign(String secret, byte[] body) {
-        // TODO(phase-3 M2): the X-Signature value: 'sha256=' + hex HMAC-SHA256 of the RAW request body with
-        //   the webhook secret.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): Webhooks.sign");
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return SIGNATURE_PREFIX + HexFormat.of().formatHex(mac.doFinal(body));
+        } catch (NoSuchAlgorithmException | InvalidKeyException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** Constant-time comparison: a byte-by-byte equals() leaks how many leading characters were right. */
     public static boolean verify(String secret, byte[] body, String header) {
-        // TODO(phase-3 M2): missing header or no 'sha256=' prefix -> false; otherwise compare with sign() in
-        //   CONSTANT time (MessageDigest.isEqual, never equals).
-        throw new UnsupportedOperationException("TODO(phase-3 M2): Webhooks.verify");
+        if (header == null || !header.startsWith(SIGNATURE_PREFIX)) {
+            return false;
+        }
+        byte[] expected = sign(secret, body).getBytes(StandardCharsets.UTF_8);
+        return MessageDigest.isEqual(expected, header.strip().getBytes(StandardCharsets.UTF_8));
     }
 
     public static String newPaymentId() {

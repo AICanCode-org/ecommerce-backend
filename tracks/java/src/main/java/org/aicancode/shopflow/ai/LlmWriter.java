@@ -2,6 +2,7 @@ package org.aicancode.shopflow.ai;
 
 import java.util.List;
 import org.aicancode.shopflow.domain.Models.Product;
+import org.aicancode.shopflow.domain.Text;
 
 /** Asks the LLM for 2-3 sentences. The product data is fenced and treated as data (prompt-injection defence). */
 public class LlmWriter implements Writer {
@@ -17,9 +18,16 @@ public class LlmWriter implements Writer {
 
     @Override
     public String write(Product product, List<String> keywords) throws Exception {
-        // TODO(phase-3 M3): send DESCRIPTION_PROMPT + the product facts between <product> tags (description
-        //   capped at 1000 characters); collapse whitespace; empty answer -> error; shorten to DESCRIPTION_MAX.
-        //   Let errors propagate: DescriptionService falls back.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): LlmWriter.write");
+        String description = product.description();
+        if (Text.chars(description) > 1000) {
+            description = description.substring(0, description.offsetByCodePoints(0, 1000));
+        }
+        String facts = "<product>\nName: " + product.name() + "\nCategory: " + product.category()
+                + "\nCurrent description: " + description + "\nKeywords: " + String.join(", ", keywords) + "\n</product>";
+        String text = Text.collapse(client.chat(PROMPT, facts, 200));
+        if (text.isEmpty()) {
+            throw new IllegalStateException("empty description");
+        }
+        return Text.shorten(text, TemplateWriter.DESCRIPTION_MAX);
     }
 }

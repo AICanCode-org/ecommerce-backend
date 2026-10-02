@@ -1,6 +1,9 @@
 package org.aicancode.shopflow.ai;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Pattern;
 import org.aicancode.shopflow.domain.Models.SearchFilters;
 import tools.jackson.databind.json.JsonMapper;
@@ -25,24 +28,61 @@ public class LlmParser implements Parser {
     }
 
     private static Long price(Object value) {
-        // TODO(phase-3 M3): helper for parse_filters: null stays null; otherwise an integer number of rupees
-        //   0..MAX_RUPEES (booleans are not numbers) -> paise, else throw.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): LlmParser.price");
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof Integer || value instanceof Long)) {
+            throw new IllegalArgumentException("price out of range: " + value);
+        }
+        long n = ((Number) value).longValue();
+        if (n < 0 || n > RuleParser.MAX_RUPEES) {
+            throw new IllegalArgumentException("price out of range: " + value);
+        }
+        return n * 100;
     }
 
     /** Anything unexpected throws -> the service falls back to the rules. */
     public static SearchFilters parseFilters(String raw, List<String> categories) {
-        // TODO(phase-3 M3): treat the model's answer like untrusted input: find the JSON object; terms a list
-        //   of <= 5 words matching _TERM (lower-cased, unique); category null or one of the allowed ones;
-        //   minPrice/maxPrice whole rupees 0..MAX_RUPEES (not booleans) and min <= max; inStock
-        //   true/false/null. Anything else -> throw (the caller falls back).
-        throw new UnsupportedOperationException("TODO(phase-3 M3): LlmParser.parseFilters");
+        int start = raw.indexOf('{');
+        int end = raw.lastIndexOf('}');
+        if (start < 0 || end < start) {
+            throw new IllegalArgumentException("no JSON object in LLM answer");
+        }
+        Object parsed = JSON.readValue(raw.substring(start, end + 1), Object.class);
+        if (!(parsed instanceof Map<?, ?> data)) {
+            throw new IllegalArgumentException("not a JSON object");
+        }
+        Object terms = data.get("terms") == null ? List.of() : data.get("terms");
+        if (!(terms instanceof List<?> list) || list.size() > RuleParser.MAX_TERMS) {
+            throw new IllegalArgumentException("terms must be a list of at most 5 words");
+        }
+        List<String> clean = new ArrayList<>();
+        for (Object t : list) {
+            if (!(t instanceof String s) || !TERM.matcher(s.toLowerCase(Locale.ROOT)).matches()) {
+                throw new IllegalArgumentException("bad term " + t);
+            }
+            if (!clean.contains(s.toLowerCase(Locale.ROOT))) {
+                clean.add(s.toLowerCase(Locale.ROOT));
+            }
+        }
+        Object category = data.get("category");
+        if (category != null && !categories.contains(category)) {
+            throw new IllegalArgumentException("unknown category " + category);
+        }
+        Long lo = price(data.get("minPrice"));
+        Long hi = price(data.get("maxPrice"));
+        if (lo != null && hi != null && lo > hi) {
+            throw new IllegalArgumentException("minPrice > maxPrice");
+        }
+        Object inStock = data.get("inStock");
+        if (inStock != null && !(inStock instanceof Boolean)) {
+            throw new IllegalArgumentException("inStock must be true or null");
+        }
+        return new SearchFilters(List.copyOf(clean), (String) category, lo, hi, Boolean.TRUE.equals(inStock) ? true : null);
     }
 
     @Override
     public SearchFilters parse(String query, List<String> categories) throws Exception {
-        // TODO(phase-3 M3): system = the search prompt with the allowed categories, user = the query between
-        //   <query> tags; return parse_filters(answer).
-        throw new UnsupportedOperationException("TODO(phase-3 M3): LlmParser.parse");
+        return parseFilters(client.chat(prompt(categories), "<query>\n" + query + "\n</query>", 120), categories);
     }
 }

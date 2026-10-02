@@ -4,6 +4,8 @@ import java.time.Clock;
 import java.util.List;
 import org.aicancode.shopflow.domain.Models.OutboxEvent;
 import org.aicancode.shopflow.domain.Models.Principal;
+import org.aicancode.shopflow.domain.Times;
+import org.aicancode.shopflow.domain.Validation;
 import org.aicancode.shopflow.repo.OrderRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,8 +26,9 @@ public class OutboxService {
     }
 
     public List<OutboxEvent> list(Principal principal, String pending, String limit) {
-        // TODO(phase-3 M5): ADMIN only; pending filter (true/false) and limit; events in id order.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): OutboxService.list");
+        AuthService.requireRole(principal, "ADMIN");
+        Boolean onlyPending = Validation.boolFilter(pending, "pending");
+        return orders.outbox(Boolean.TRUE.equals(onlyPending), Validation.limit(limit));
     }
 
     /**
@@ -34,9 +37,18 @@ public class OutboxService {
      * event id.
      */
     public int publishPending(Principal principal) {
-        // TODO(phase-3 M5): ADMIN only. The relay (ADR-0005): pending events in id order (OUTBOX_BATCH),
-        //   publish each and mark it published; on the FIRST publish failure log a warning and stop. Return how
-        //   many were published.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): OutboxService.publishPending");
+        AuthService.requireRole(principal, "ADMIN");
+        int published = 0;
+        for (OutboxEvent event : orders.outbox(true, BATCH)) {
+            try {
+                publisher.publish(event);
+            } catch (Exception e) { // a broker failure must not lose the remaining events
+                LOG.warn("publishing event {} failed, will retry: {}", event.id(), e.getMessage());
+                break;
+            }
+            orders.markPublished(event.id(), Times.now(clock));
+            published++;
+        }
+        return published;
     }
 }

@@ -22,8 +22,14 @@ public class SearchAssistService {
     }
 
     public Assist interpret(String query, List<String> categories) {
-        // TODO(phase-3 M3): LLM if configured; ANY exception -> rules with fallback=true (log a warning). No
-        //   LLM -> rules, fallback=false.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): SearchAssistService.interpret");
+        if (llm != null) {
+            try {
+                return new Assist("llm", false, llm.parse(query, categories));
+            } catch (Exception e) { // any LLM failure -> graceful fallback
+                LOG.warn("LLM search assist failed, using the rules: {}", e.toString());
+                return new Assist("rules", true, rules.parse(query, categories));
+            }
+        }
+        return new Assist("rules", false, rules.parse(query, categories));
     }
 }
