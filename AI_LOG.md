@@ -64,3 +64,35 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   against `spec/openapi.yaml`; each acceptance criterion maps to a test name.
 * **Time saved / lost (honest guess):** saved ~1 h of writing; the cross-check took 15 minutes.
 * **What I learned:** requirements and contract drift apart within one draft. Check names, not just ideas.
+
+### 2026-10-02 · Phase 3 · A starter that could not even start
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Generate the starter stubs from the reference code: every method body becomes `TODO(phase-3 Mx)` with a one-line hint.
+* **What it produced:** stubs in all three tracks that compiled. But the Python starter crashed at start-up:
+  `PasswordHasher.__init__` computes a dummy bcrypt hash (so that a login with an unknown e-mail costs the
+  same time as a wrong password, T11) by calling `self.hash(...)`, and `hash` was now a stub that raises.
+  `/health` was unreachable, so Phase 0 would have failed for every Python student.
+* **What I kept / changed / rejected and why:** kept the generated stubs; the dummy hash is now `None` in
+  the starter with a `TODO(phase-3 M2)` to compute it once `hash()` works. Rejected the alternative of
+  catching the error in the constructor, which would hide a real failure in the solution.
+* **How I verified it:** a boot script starts each starter with empty migrations and checks `/health`
+  (`200` in all three tracks; `register` answers `500 application/problem+json` until M2 is done).
+* **Time saved / lost (honest guess):** generation saved hours; this review took 15 minutes.
+* **What I learned:** anything a constructor calls runs before any test can be skipped. Boot the starter, don't just compile it.
+
+### 2026-10-02 · Phase 3 · Lint fixes that would have deleted the exercise
+* **Tool / model:** AI coding agent + `ruff --fix`, ESLint
+* **Prompt (summary):**
+  > The generated starters fail lint with unused imports and unused declarations. Fix it.
+* **What it produced:** `ruff --fix` removed the Python imports that only the stubbed bodies used (correct:
+  students add them back as they implement). For TypeScript it proposed deleting `price()` and
+  `class Rollback`, which looked unused once the bodies calling them were stubs.
+* **What I kept / changed / rejected and why:** kept the Python fix; rejected the TypeScript deletions,
+  because M3 (`price()` in the search-assist parser) and M5 (`Rollback` in the checkout transaction) need
+  them. They are exported instead, which satisfies the linter without removing code students rely on.
+* **How I verified it:** lint is clean in all three starters; the always-on tests pass and the rest are
+  reported as pending (Python 2 passed, TypeScript 2 passed, Java 4 run and 117 skipped); every
+  `TODO(phase-3 Mx)` hint was compared with the tests of its class.
+* **Time saved / lost (honest guess):** neutral.
+* **What I learned:** "unused" is relative to the current state of the code. A starter is deliberately incomplete.
