@@ -15,7 +15,9 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Protocol
 
+from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from .errors import DuplicateError, InsufficientStockError
@@ -149,21 +151,27 @@ class _Pg:
 
 class PostgresUserRepository(_Pg):
     def insert_user(self, email, password_hash, display_name, role, at) -> User:
-        # TODO(phase-3 M2): INSERT ... RETURNING; a unique violation on email (SQLSTATE 23505) ->
-        #   DuplicateError.
-        raise NotImplementedError("TODO(phase-3 M2): PostgresUserRepository.insert_user")
+        try:
+            row = self._one(
+                f"INSERT INTO users (email, password_hash, display_name, role, created_at) "
+                f"VALUES (%s, %s, %s, %s, %s) RETURNING {_USER_COLS}",
+                (email, password_hash, display_name, role, at),
+            )
+        except pg_errors.UniqueViolation as exc:
+            raise DuplicateError("email") from exc
+        return User(**row)  # type: ignore[arg-type]
 
     def find_user_by_email(self, email) -> User | None:
-        # TODO(phase-3 M2): SELECT by email (already lower-cased).
-        raise NotImplementedError("TODO(phase-3 M2): PostgresUserRepository.find_user_by_email")
+        row = self._one(f"SELECT {_USER_COLS} FROM users WHERE email = %s", (email,))
+        return User(**row) if row else None
 
     def find_user(self, user_id) -> User | None:
-        # TODO(phase-3 M2): SELECT by id.
-        raise NotImplementedError("TODO(phase-3 M2): PostgresUserRepository.find_user")
+        row = self._one(f"SELECT {_USER_COLS} FROM users WHERE id = %s", (user_id,))
+        return User(**row) if row else None
 
     def update_role(self, user_id, role) -> User | None:
-        # TODO(phase-3 M2): UPDATE ... RETURNING; null when the user does not exist.
-        raise NotImplementedError("TODO(phase-3 M2): PostgresUserRepository.update_role")
+        row = self._one(f"UPDATE users SET role = %s WHERE id = %s RETURNING {_USER_COLS}", (role, user_id))
+        return User(**row) if row else None
 
     def ping(self) -> bool:
         try:
@@ -176,109 +184,244 @@ class PostgresUserRepository(_Pg):
 
 class PostgresProductRepository(_Pg):
     def insert_product(self, p: Product) -> Product:
-        # TODO(phase-3 M3): INSERT ... RETURNING; unique violation on sku -> DuplicateError.
-        raise NotImplementedError("TODO(phase-3 M3): PostgresProductRepository.insert_product")
+        try:
+            row = self._one(
+                "INSERT INTO products (sku, name, description, category, price_paise, stock, active, created_at, "
+                f"updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_PRODUCT_COLS}",
+                (p.sku, p.name, p.description, p.category, p.price_paise, p.stock, p.active,
+                 p.created_at, p.updated_at),
+            )  # fmt: skip
+        except pg_errors.UniqueViolation as exc:
+            raise DuplicateError("sku") from exc
+        return Product(**row)  # type: ignore[arg-type]
 
     def find_product(self, sku) -> Product | None:
-        # TODO(phase-3 M3): SELECT by sku (active or not: the service decides who may see it).
-        raise NotImplementedError("TODO(phase-3 M3): PostgresProductRepository.find_product")
+        row = self._one(f"SELECT {_PRODUCT_COLS} FROM products WHERE sku = %s", (sku,))
+        return Product(**row) if row else None
 
     def update_product(self, p: Product, expected_version: int) -> Product | None:
         # Optimistic locking: the WHERE clause only matches if nobody saved in between (ADR-0003).
-        # TODO(phase-3 M3): UPDATE ... SET ..., version = version + 1 WHERE id = ? AND version = ?
-        #   RETURNING; 0 rows -> null (conflict).
-        raise NotImplementedError("TODO(phase-3 M3): PostgresProductRepository.update_product")
+        row = self._one(
+            "UPDATE products SET name = %s, description = %s, category = %s, price_paise = %s, active = %s, "
+            f"updated_at = %s, version = version + 1 WHERE id = %s AND version = %s RETURNING {_PRODUCT_COLS}",
+            (p.name, p.description, p.category, p.price_paise, p.active, p.updated_at, p.id, expected_version),
+        )
+        return Product(**row) if row else None
 
     def adjust_stock(self, product_id, delta, at) -> Product | None:
         # One statement, guarded: never read-modify-write stock in application code (ADR-0002).
-        # TODO(phase-3 M3): ONE statement: UPDATE products SET stock = stock + delta WHERE id = ?
-        #   AND stock + delta >= 0 RETURNING; 0 rows -> null. Never read-then-write (ADR-0002).
-        raise NotImplementedError("TODO(phase-3 M3): PostgresProductRepository.adjust_stock")
+        row = self._one(
+            f"UPDATE products SET stock = stock + %s, updated_at = %s WHERE id = %s AND stock + %s >= 0 "
+            f"RETURNING {_PRODUCT_COLS}",
+            (delta, at, product_id, delta),
+        )
+        return Product(**row) if row else None
 
     def search_products(self, query: ProductQuery) -> list[Product]:
-        # TODO(phase-3 M3): active products WHERE id > after_id [AND search_vector @@
-        #   plainto_tsquery('english', q)] [AND category] [AND price range] [AND stock > 0 / stock = 0
-        #   for inStock true/false] ORDER BY id LIMIT n.
-        raise NotImplementedError("TODO(phase-3 M3): PostgresProductRepository.search_products")
+        where, params = ["active"], []
+        if query.after_id is not None:
+            where.append("id > %s")  # keyset pagination: no OFFSET scan
+            params.append(query.after_id)
+        if query.q:
+            where.append("search_vector @@ plainto_tsquery('english', %s)")
+            params.append(query.q)
+        if query.category:
+            where.append("category = %s")
+            params.append(query.category)
+        if query.min_price_paise is not None:
+            where.append("price_paise >= %s")
+            params.append(query.min_price_paise)
+        if query.max_price_paise is not None:
+            where.append("price_paise <= %s")
+            params.append(query.max_price_paise)
+        if query.in_stock is not None:
+            where.append("stock > 0" if query.in_stock else "stock = 0")
+        params.append(query.limit)
+        sql = f"SELECT {_PRODUCT_COLS} FROM products WHERE {' AND '.join(where)} ORDER BY id LIMIT %s"
+        rows = self._all(sql, params)
+        return [Product(**r) for r in rows]
 
     def categories(self) -> list[CategoryCount]:
-        # TODO(phase-3 M3): SELECT category, COUNT(*) FROM products WHERE active GROUP BY category
-        #   ORDER BY category.
-        raise NotImplementedError("TODO(phase-3 M3): PostgresProductRepository.categories")
+        rows = self._all(
+            "SELECT category, COUNT(*) AS n FROM products WHERE active GROUP BY category ORDER BY category", ()
+        )
+        return [CategoryCount(r["category"], r["n"]) for r in rows]
 
 
 class PostgresCartRepository(_Pg):
     def cart(self, user_id) -> CartState:
-        # TODO(phase-3 M4): the user's cart lines joined with their products (ORDER BY added_at,
-        #   product id) and the cart's coupon code; no cart row -> empty.
-        raise NotImplementedError("TODO(phase-3 M4): PostgresCartRepository.cart")
+        rows = self._all(
+            f"SELECT {', '.join('p.' + c.strip() for c in _PRODUCT_COLS.split(','))}, ci.quantity "
+            "FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.user_id = %s "
+            "ORDER BY ci.added_at, p.id",
+            (user_id,),
+        )
+        lines = [CartLine(Product(**{k: v for k, v in r.items() if k != "quantity"}), r["quantity"]) for r in rows]
+        coupon = self._one("SELECT coupon_code FROM carts WHERE user_id = %s", (user_id,))
+        return CartState(lines, coupon["coupon_code"] if coupon else None)
 
     def set_cart_item(self, user_id, product_id, quantity, at) -> None:
-        # TODO(phase-3 M4): upsert the cart row, then INSERT ... ON CONFLICT (user_id, product_id)
-        #   DO UPDATE SET quantity = EXCLUDED.quantity.
-        raise NotImplementedError("TODO(phase-3 M4): PostgresCartRepository.set_cart_item")
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO cart_items (user_id, product_id, quantity, added_at) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (user_id, product_id) DO UPDATE SET quantity = EXCLUDED.quantity",
+                (user_id, product_id, quantity, at),
+            )
 
     def remove_cart_item(self, user_id, product_id) -> None:
-        # TODO(phase-3 M4): DELETE the line (no error when it is not there).
-        raise NotImplementedError("TODO(phase-3 M4): PostgresCartRepository.remove_cart_item")
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM cart_items WHERE user_id = %s AND product_id = %s", (user_id, product_id))
 
     def set_coupon(self, user_id, code, at) -> None:
-        # TODO(phase-3 M4): upsert the cart row with the coupon code (null clears it).
-        raise NotImplementedError("TODO(phase-3 M4): PostgresCartRepository.set_coupon")
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO carts (user_id, coupon_code, updated_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET coupon_code = EXCLUDED.coupon_code, "
+                "updated_at = EXCLUDED.updated_at",
+                (user_id, code, at),
+            )
 
     def find_coupon(self, code) -> Coupon | None:
-        # TODO(phase-3 M4): SELECT the coupon by code (the service checks active).
-        raise NotImplementedError("TODO(phase-3 M4): PostgresCartRepository.find_coupon")
+        row = self._one(
+            "SELECT code, kind, value, min_subtotal_paise, max_discount_paise, active FROM coupons WHERE code = %s",
+            (code,),
+        )
+        return Coupon(**row) if row else None
 
 
 class PostgresOrderRepository(_Pg):
     def find_order_by_key(self, user_id, key) -> Order | None:
-        # TODO(phase-3 M5): the order with this (user id, idempotency key), or null.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.find_order_by_key")
+        row = self._one(_ORDER_SELECT + "WHERE o.user_id = %s AND o.idempotency_key = %s", (user_id, key))
+        return _order(row) if row else None
 
     def place_order(self, d: OrderDraft) -> Order:
         """ONE transaction: stock, order, lines, payment, outbox, empty cart. Any failure -> nothing written."""
-        # TODO(phase-3 M5): ONE transaction: for every line a GUARDED stock decrement (WHERE id = ?
-        #   AND active AND stock >= qty; 0 rows -> InsufficientStock + rollback), INSERT the order
-        #   (unique (user, key) -> DuplicateError), its lines, the PENDING payment, an order.placed
-        #   outbox event, and empty the cart.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.place_order")
+        try:
+            with self._pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                # Lock rows in a fixed order (product id) so two checkouts can never deadlock.
+                for line in sorted(d.lines, key=lambda x: x.product_id):
+                    cur.execute(
+                        "UPDATE products SET stock = stock - %s, updated_at = %s "
+                        "WHERE id = %s AND active AND stock >= %s",
+                        (line.quantity, d.at, line.product_id, line.quantity),
+                    )
+                    if cur.rowcount != 1:
+                        raise InsufficientStockError(line.sku)
+                p = d.pricing
+                cur.execute(
+                    "INSERT INTO orders (user_id, status, subtotal_paise, discount_paise, shipping_paise, total_paise, "
+                    "coupon_code, idempotency_key, created_at, updated_at) "
+                    "VALUES (%s, 'PENDING_PAYMENT', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (d.user_id, p.subtotal_paise, p.discount_paise, p.shipping_paise, p.total_paise,
+                     d.coupon_code, d.idempotency_key, d.at, d.at),
+                )  # fmt: skip
+                order_id = cur.fetchone()["id"]  # type: ignore[index]
+                for n, line in enumerate(d.lines, start=1):
+                    cur.execute(
+                        "INSERT INTO order_items (order_id, line_no, product_id, sku, name, unit_price_paise, "
+                        "quantity) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (order_id, n, line.product_id, line.sku, line.name, line.unit_price_paise, line.quantity),
+                    )
+                cur.execute(
+                    "INSERT INTO payments (id, order_id, provider, status, amount_paise, created_at, updated_at) "
+                    "VALUES (%s, %s, %s, 'PENDING', %s, %s, %s)",
+                    (d.payment_id, order_id, PAYMENT_PROVIDER, p.total_paise, d.at, d.at),
+                )
+                cur.execute(
+                    "INSERT INTO outbox_events (type, order_id, payload, created_at) "
+                    "VALUES ('order.placed', %s, %s, %s)",
+                    (order_id, Jsonb(order_event_payload(d, order_id, "PENDING_PAYMENT")), d.at),
+                )
+                cur.execute("DELETE FROM cart_items WHERE user_id = %s", (d.user_id,))
+                cur.execute(
+                    "UPDATE carts SET coupon_code = NULL, updated_at = %s WHERE user_id = %s", (d.at, d.user_id)
+                )
+                cur.execute(_ORDER_SELECT + "WHERE o.id = %s", (order_id,))
+                return _order(cur.fetchone())  # type: ignore[arg-type]
+        except pg_errors.UniqueViolation as exc:
+            raise DuplicateError("idempotency_key") from exc
 
     def find_order(self, order_id) -> Order | None:
-        # TODO(phase-3 M5): the order by id with its lines, or null.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.find_order")
+        row = self._one(_ORDER_SELECT + "WHERE o.id = %s", (order_id,))
+        return _order(row) if row else None
 
     def orders_for_user(self, user_id, limit) -> list[Order]:
-        # TODO(phase-3 M5): the user's orders, newest first (ORDER BY id DESC), LIMIT n.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.orders_for_user")
+        return [_order(r) for r in self._all(_ORDER_SELECT + "WHERE o.user_id = %s ORDER BY o.id DESC LIMIT %s",
+                                             (user_id, limit))]  # fmt: skip
 
     def orders_by_status(self, status, limit) -> list[Order]:
-        # TODO(phase-3 M5): all orders [with this status], newest first, LIMIT n.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.orders_by_status")
+        if status is None:
+            return [_order(r) for r in self._all(_ORDER_SELECT + "ORDER BY o.id DESC LIMIT %s", (limit,))]
+        rows = self._all(_ORDER_SELECT + "WHERE o.status = %s ORDER BY o.id DESC LIMIT %s", (status, limit))
+        return [_order(r) for r in rows]
 
     def find_payment(self, payment_id) -> Payment | None:
-        # TODO(phase-3 M5): the payment by its provider id, or null.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.find_payment")
+        row = self._one(
+            "SELECT id, order_id, provider, status, amount_paise, created_at, updated_at FROM payments WHERE id = %s",
+            (payment_id,),
+        )
+        return Payment(**row) if row else None
 
     def has_payment_event(self, event_id) -> bool:
-        # TODO(phase-3 M5): true when this webhook event id was already recorded.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.has_payment_event")
+        return self._one("SELECT 1 AS x FROM payment_events WHERE event_id = %s", (event_id,)) is not None
 
     def apply_transition(self, t: Transition) -> str:
         """ONE transaction. Raising inside `conn.transaction()` rolls everything back."""
-        # TODO(phase-3 M5): ONE transaction: record the webhook event if any (unique id ->
-        #   'duplicate'), compare-and-set the order status (UPDATE ... WHERE id AND status = from; 0
-        #   rows -> 'conflict' + rollback), update the payment, restock, insert the outbox events.
-        #   'ok' when it all committed.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.apply_transition")
+        try:
+            with self._pool.connection() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                if t.webhook_event_id is not None:
+                    cur.execute(
+                        "INSERT INTO payment_events (event_id, payment_id, type, received_at) VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT (event_id) DO NOTHING",
+                        (t.webhook_event_id, t.payment_id, t.webhook_event_type, t.at),
+                    )
+                    if cur.rowcount == 0:
+                        raise _Duplicate()
+                if t.payment_status is not None:
+                    cur.execute(
+                        "UPDATE payments SET status = %s, updated_at = %s WHERE id = %s AND status = 'PENDING'",
+                        (t.payment_status, t.at, t.payment_id),
+                    )
+                    if cur.rowcount != 1:
+                        raise _Conflict()
+                if t.to_status is not None:
+                    # Compare-and-set on the status: two admins (or an admin and a webhook) cannot both win.
+                    cur.execute(
+                        "UPDATE orders SET status = %s, updated_at = %s WHERE id = %s AND status = %s",
+                        (t.to_status, t.at, t.order_id, t.from_status),
+                    )
+                    if cur.rowcount != 1:
+                        raise _Conflict()
+                if t.restock:
+                    cur.execute(
+                        "UPDATE products p SET stock = p.stock + i.quantity, updated_at = %s "
+                        "FROM order_items i WHERE i.order_id = %s AND p.id = i.product_id",
+                        (t.at, t.order_id),
+                    )
+                for e in t.events:
+                    cur.execute(
+                        "INSERT INTO outbox_events (type, order_id, payload, created_at) VALUES (%s, %s, %s, %s)",
+                        (e.type, t.order_id, Jsonb(e.payload), t.at),
+                    )
+        except _Duplicate:
+            return "duplicate"
+        except _Conflict:
+            return "conflict"
+        return "ok"
 
     def outbox(self, pending_only, limit) -> list[OutboxEvent]:
-        # TODO(phase-3 M5): outbox events [only unpublished] ORDER BY id LIMIT n.
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.outbox")
+        where = "WHERE published_at IS NULL " if pending_only else ""
+        rows = self._all(
+            f"SELECT id, type, order_id, payload, created_at, published_at FROM outbox_events {where}"
+            "ORDER BY id LIMIT %s",
+            (limit,),
+        )
+        return [OutboxEvent(**r) for r in rows]
 
     def mark_published(self, event_id, at) -> None:
-        # TODO(phase-3 M5): set published_at on the event (only if it is still null).
-        raise NotImplementedError("TODO(phase-3 M5): PostgresOrderRepository.mark_published")
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE outbox_events SET published_at = %s WHERE id = %s AND published_at IS NULL",
+                         (at, event_id))  # fmt: skip
 
 
 # ---------------------------------------------------------------------------------------------

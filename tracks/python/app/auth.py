@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import logging
-
+from . import validation as v
 from .clock import Clock
+from .errors import DuplicateError, email_taken, forbidden, invalid_credentials, unauthorized, validation_error
 from .models import LoginResult, Principal, User
 from .repository import UserRepository
 from .security import PasswordHasher, TokenService
 
 
 def require_role(principal: Principal, *roles: str) -> None:
-    # TODO(phase-3 M2): 403 forbidden 'requires role X' unless principal.role is one of the given
-    #   roles.
-    raise NotImplementedError("TODO(phase-3 M2): require_role")
+    if principal.role not in roles:
+        raise forbidden(f"requires role {' or '.join(roles)}")
 
 
 class AuthService:
@@ -24,37 +23,55 @@ class AuthService:
         self._clock = clock
 
     def register(self, payload: object) -> User:
-        # TODO(phase-3 M2): validate email, password, displayName; ALWAYS create a CUSTOMER (ignore
-        #   any 'role' in the payload: mass assignment!); hash the password; DuplicateError -> 409
-        #   email-taken.
-        raise NotImplementedError("TODO(phase-3 M2): AuthService.register")
+        data = v.require_object(payload)
+        email = v.email(data.get("email"))
+        password = v.password(data.get("password"))
+        name = v.display_name(data.get("displayName"))
+        # Never read "role" from the request: everyone starts as CUSTOMER (mass-assignment defence).
+        try:
+            return self.users.insert_user(email, self._hasher.hash(password), name, "CUSTOMER", self._clock())
+        except DuplicateError as exc:
+            raise email_taken() from exc
 
     def login(self, payload: object) -> LoginResult:
-        # TODO(phase-3 M2): email and password must be strings (400); the SAME 401 invalid-
-        #   credentials for an unknown e-mail and a wrong password, and still run one bcrypt verify
-        #   for an unknown e-mail (timing). Passwords over 72 bytes are a 401 too. Returns the access
-        #   token + the user.
-        raise NotImplementedError("TODO(phase-3 M2): AuthService.login")
+        data = v.require_object(payload)
+        email, password = data.get("email"), data.get("password")
+        if not isinstance(email, str) or not isinstance(password, str):
+            raise validation_error("email and password are required")
+        user = self.users.find_user_by_email(email.strip().lower())
+        # verify() also runs for unknown e-mails (against a dummy hash): same answer, same timing.
+        if len(password.encode("utf-8")) > 72 or not self._hasher.verify(
+            password, user.password_hash if user else None
+        ):
+            raise invalid_credentials()
+        assert user is not None
+        return LoginResult(self._tokens.issue_access_token(user), user)
 
     def me(self, principal: Principal) -> User:
-        # TODO(phase-3 M2): the current user; 401 unauthorized 'account no longer exists' if it was
-        #   removed.
-        raise NotImplementedError("TODO(phase-3 M2): AuthService.me")
+        user = self.users.find_user(principal.user_id)
+        if user is None:
+            raise unauthorized("account no longer exists")
+        return user
 
     def ensure_admin(self, email: str, password: str) -> User:
         """Start-up bootstrap from ADMIN_EMAIL / ADMIN_PASSWORD (there is no other way to get an ADMIN)."""
-        # TODO(phase-3 M2): create ADMIN_EMAIL as an ADMIN, or promote it if it exists. Until you
-        #   build it the app starts without an admin.
-        logging.getLogger("shopflow").warning("TODO(phase-3 M2): ensure_admin - starting without an admin")
-        return None  # type: ignore[return-value]
+        email = v.email(email)
+        existing = self.users.find_user_by_email(email)
+        if existing is not None:
+            return existing if existing.role == "ADMIN" else self.users.update_role(existing.id, "ADMIN")  # type: ignore[return-value]
+        return self.users.insert_user(email, self._hasher.hash(v.password(password)), "Admin", "ADMIN", self._clock())
 
     def authenticate(self, authorization: str | None) -> Principal:
-        # TODO(phase-3 M2): optional(header), but null -> 401 unauthorized (the HTTP layer adds WWW-
-        #   Authenticate).
-        raise NotImplementedError("TODO(phase-3 M2): AuthService.authenticate")
+        principal = self.optional(authorization)
+        if principal is None:
+            raise unauthorized()
+        return principal
 
     def optional(self, authorization: str | None) -> Principal | None:
         """No header -> anonymous. A header that is present but wrong is always a 401, never anonymous."""
-        # TODO(phase-3 M2): no header -> null (anonymous). 'Bearer <jwt>' -> verify it. A header
-        #   that is present but bad is ALWAYS a 401, never silently anonymous.
-        raise NotImplementedError("TODO(phase-3 M2): AuthService.optional")
+        if authorization is None:
+            return None
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token.strip():
+            raise unauthorized("use Authorization: Bearer <token>")
+        return self._tokens.verify_access_token(token.strip())

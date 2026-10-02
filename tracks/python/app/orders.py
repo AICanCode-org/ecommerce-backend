@@ -7,13 +7,25 @@ import logging
 from collections.abc import Callable
 from typing import Protocol
 
+from . import validation as v
+from .auth import require_role
+from .catalog import is_admin
 from .clock import Clock
 from .errors import (
     ApiError,
+    DuplicateError,
+    InsufficientStockError,
+    cart_empty,
+    insufficient_stock,
+    invalid_signature,
     invalid_transition,
+    not_found,
+    validation_error,
 )
-from .models import Order, OutboxEvent, Principal, Transition
-from .repository import CartRepository, OrderRepository
+from .models import NewEvent, Order, OrderDraft, OrderLine, OutboxEvent, Principal, Transition
+from .money import price_cart
+from .repository import CartRepository, OrderRepository, order_event_payload
+from .security import verify_webhook
 
 log = logging.getLogger("shopflow.orders")
 
@@ -34,9 +46,10 @@ OUTBOX_BATCH = 100
 
 
 def next_status(current: str, action: str) -> str:
-    # TODO(phase-3 M5): look up (current, action) in TRANSITIONS; not there -> 409 invalid-
-    #   transition 'cannot <action> an order that is <status>'.
-    raise NotImplementedError("TODO(phase-3 M5): next_status")
+    target = TRANSITIONS.get((current, action))
+    if target is None:
+        raise invalid_transition(f"cannot {action} an order that is {current}")
+    return target
 
 
 def concurrent_change() -> ApiError:
@@ -45,10 +58,11 @@ def concurrent_change() -> ApiError:
 
 def transition_for(order: Order, action: str, at) -> Transition:
     """The status change plus its side effects: restock on cancel, outbox events, refund if it was paid."""
-    # TODO(phase-3 M5): next_status + the side effects: an outbox event for the new status
-    #   (EVENT_FOR_STATUS), a refund.requested event when a PAID order is cancelled, and restock when
-    #   the target is CANCELLED.
-    raise NotImplementedError("TODO(phase-3 M5): transition_for")
+    target = next_status(order.status, action)
+    events = [NewEvent(EVENT_FOR_STATUS[target], order_event_payload(order, order.id, target))]
+    if action == "cancel" and order.status == "PAID":
+        events.append(NewEvent("refund.requested", order_event_payload(order, order.id, target)))
+    return Transition(order.id, order.status, target, at, restock=target == "CANCELLED", events=events)
 
 
 class OrderService:
@@ -66,40 +80,67 @@ class OrderService:
 
     def checkout(self, principal: Principal, idempotency_key: str | None) -> tuple[Order, bool]:
         """Returns (order, replayed). The same Idempotency-Key always returns the same order (ADR-0004)."""
-        # TODO(phase-3 M5): ADR-0004: validate the Idempotency-Key; an order with that key -> return
-        #   it (replayed=true). Empty cart -> 409 cart-empty; inactive product -> 409 insufficient-
-        #   stock. Price the cart, snapshot the lines and the coupon (only if applied), new payment
-        #   id, place_order in ONE transaction. InsufficientStock -> 409; DuplicateError (same key
-        #   raced us) -> return the winner, replayed.
-        raise NotImplementedError("TODO(phase-3 M5): OrderService.checkout")
+        key = v.idempotency_key(idempotency_key)
+        existing = self.orders.find_order_by_key(principal.user_id, key)
+        if existing is not None:
+            return existing, True
+        state = self._carts.cart(principal.user_id)
+        if not state.lines:
+            raise cart_empty()
+        for line in state.lines:
+            if not line.product.active:
+                raise insufficient_stock(f"{line.product.sku} is no longer available")
+        coupon = self._carts.find_coupon(state.coupon_code) if state.coupon_code else None
+        pricing = price_cart([(line.product.price_paise, line.quantity) for line in state.lines], coupon)
+        draft = OrderDraft(
+            user_id=principal.user_id,
+            idempotency_key=key,
+            lines=[
+                OrderLine(x.product.id, x.product.sku, x.product.name, x.product.price_paise, x.quantity)
+                for x in state.lines
+            ],  # fmt: skip
+            pricing=pricing,
+            coupon_code=state.coupon_code if pricing.coupon_applied else None,
+            payment_id=self._new_payment_id(),
+            at=self._clock(),
+        )
+        try:
+            return self.orders.place_order(draft), False
+        except InsufficientStockError as exc:
+            raise insufficient_stock(f"not enough stock for {exc.sku}") from exc
+        except DuplicateError:
+            # The same key raced us (double click, retry after a timeout): return the winner's order.
+            winner = self.orders.find_order_by_key(principal.user_id, key)
+            if winner is None:  # pragma: no cover - the unique key guarantees it exists
+                raise
+            return winner, True
 
     def get(self, principal: Principal, order_id: int) -> Order:
-        # TODO(phase-3 M5): missing, or someone else's order (unless ADMIN) -> 404 not-found 'order'
-        #   (never 403: don't confirm it exists).
-        raise NotImplementedError("TODO(phase-3 M5): OrderService.get")
+        order = self.orders.find_order(order_id)
+        if order is None or (order.user_id != principal.user_id and not is_admin(principal)):
+            raise not_found("order")  # someone else's order is "not found", never "forbidden"
+        return order
 
     def mine(self, principal: Principal, limit: str | None) -> list[Order]:
-        # TODO(phase-3 M5): the caller's orders, newest first, validated limit.
-        raise NotImplementedError("TODO(phase-3 M5): OrderService.mine")
+        return self.orders.orders_for_user(principal.user_id, v.limit(limit))
 
     def cancel(self, principal: Principal, order_id: int) -> Order:
-        # TODO(phase-3 M5): get (404 rules) then apply 'cancel'.
-        raise NotImplementedError("TODO(phase-3 M5): OrderService.cancel")
+        return self._apply(self.get(principal, order_id), "cancel")
 
     def admin_list(self, principal: Principal, status: str | None, limit: str | None) -> list[Order]:
-        # TODO(phase-3 M5): ADMIN only; validated status filter and limit.
-        raise NotImplementedError("TODO(phase-3 M5): OrderService.admin_list")
+        require_role(principal, "ADMIN")
+        return self.orders.orders_by_status(v.order_status_filter(status), v.limit(limit))
 
     def admin_set_status(self, principal: Principal, order_id: int, payload: object) -> Order:
-        # TODO(phase-3 M5): ADMIN only; validate status (SHIPPED or DELIVERED), map it to the action
-        #   (ship/deliver), get, apply.
-        raise NotImplementedError("TODO(phase-3 M5): OrderService.admin_set_status")
+        require_role(principal, "ADMIN")
+        target = v.order_status_target(v.require_object(payload).get("status"))
+        return self._apply(self.get(principal, order_id), ACTION_FOR_TARGET[target])
 
     def _apply(self, order: Order, action: str) -> Order:
-        # TODO(phase-3 M5): apply_transition(transition_for(order, action, now)); anything but 'ok'
-        #   -> 409 (the order changed meanwhile: compare-and-set on the status). Return the order read
-        #   back.
-        raise NotImplementedError("TODO(phase-3 M5): OrderService._apply")
+        result = self.orders.apply_transition(transition_for(order, action, self._clock()))
+        if result != "ok":
+            raise concurrent_change()
+        return self.orders.find_order(order.id)  # type: ignore[return-value]
 
 
 class PaymentService:
@@ -111,13 +152,53 @@ class PaymentService:
         self._clock = clock
 
     def handle_webhook(self, body: bytes, signature: str | None) -> dict:
-        # TODO(phase-3 M5): verify the signature on the RAW body FIRST (401 invalid-signature); then
-        #   JSON object, id (8-64 chars), type (payment.succeeded / payment.failed), paymentId;
-        #   unknown payment -> 404; a seen event id -> {status: duplicate}. Decide the transition (see
-        #   the payments tests: pay, late payment -> refund.requested, fail -> cancel + restock,
-        #   settled -> ignored) and apply it atomically together with recording the event; 'duplicate'
-        #   -> duplicate, 'conflict' -> 409.
-        raise NotImplementedError("TODO(phase-3 M5): PaymentService.handle_webhook")
+        if not verify_webhook(self._secret, body, signature):
+            raise invalid_signature()
+        try:
+            data = json.loads(body)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise validation_error("request body must be a JSON object") from exc
+        data = v.require_object(data)
+        event_id, kind, payment_id = data.get("id"), data.get("type"), data.get("paymentId")
+        if not isinstance(event_id, str) or not v.IDEMPOTENCY_KEY_RE.match(event_id):
+            raise validation_error("id must be 8-64 characters: A-Z, a-z, 0-9, _ and -")
+        if kind not in WEBHOOK_TYPES:
+            raise validation_error(f"type must be one of {', '.join(WEBHOOK_TYPES)}")
+        if not isinstance(payment_id, str) or not payment_id:
+            raise validation_error("paymentId is required")
+        payment = self.orders.find_payment(payment_id)
+        if payment is None:
+            raise not_found("payment")
+        if self.orders.has_payment_event(event_id):
+            return {"eventId": event_id, "status": "duplicate"}
+        order = self.orders.find_order(payment.order_id)
+        assert order is not None
+        now = self._clock()
+        base = {"order_id": order.id, "from_status": order.status, "at": now, "payment_id": payment.id,
+                "webhook_event_id": event_id, "webhook_event_type": kind}  # fmt: skip
+        if payment.status != "PENDING":
+            # A second, different event for a payment we already settled: record it, change nothing.
+            t, outcome = Transition(**base, to_status=None), "ignored"
+        elif kind == "payment.succeeded" and order.status == "PENDING_PAYMENT":
+            pay = transition_for(order, "pay", now)
+            t = Transition(**base, to_status="PAID", payment_status="SUCCEEDED", events=pay.events)
+            outcome = "processed"
+        elif kind == "payment.succeeded":
+            # Money arrived for an order that was cancelled meanwhile: keep the order, refund the customer.
+            refund = NewEvent("refund.requested", order_event_payload(order, order.id, order.status))
+            t, outcome = Transition(**base, to_status=None, payment_status="SUCCEEDED", events=[refund]), "processed"
+        elif order.status == "PENDING_PAYMENT":
+            fail = transition_for(order, "fail", now)
+            t = Transition(**base, to_status="CANCELLED", payment_status="FAILED", restock=True, events=fail.events)
+            outcome = "processed"
+        else:
+            t, outcome = Transition(**base, to_status=None, payment_status="FAILED"), "processed"
+        result = self.orders.apply_transition(t)
+        if result == "duplicate":
+            return {"eventId": event_id, "status": "duplicate"}
+        if result == "conflict":
+            raise concurrent_change()  # 409: the provider retries the webhook later
+        return {"eventId": event_id, "status": outcome}
 
 
 class EventPublisher(Protocol):
@@ -138,8 +219,9 @@ class OutboxService:
         self._clock = clock
 
     def list(self, principal: Principal, pending: str | None, limit: str | None) -> list[OutboxEvent]:
-        # TODO(phase-3 M5): ADMIN only; pending filter (true/false) and limit; events in id order.
-        raise NotImplementedError("TODO(phase-3 M5): OutboxService.list")
+        require_role(principal, "ADMIN")
+        only_pending = v.bool_filter(pending, "pending")
+        return self.orders.outbox(bool(only_pending), v.limit(limit))
 
     def publish_pending(self, principal: Principal) -> int:
         """The relay: publish in id order, mark each one after the broker accepted it. Stops at the first failure.
@@ -147,7 +229,14 @@ class OutboxService:
         A crash between publish and mark means the event is published again: at-least-once delivery,
         so consumers de-duplicate on the event id (ADR-0005).
         """
-        # TODO(phase-3 M5): ADMIN only. The relay (ADR-0005): pending events in id order
-        #   (OUTBOX_BATCH), publish each and mark it published; on the FIRST publish failure log a
-        #   warning and stop. Return how many were published.
-        raise NotImplementedError("TODO(phase-3 M5): OutboxService.publish_pending")
+        require_role(principal, "ADMIN")
+        published = 0
+        for event in self.orders.outbox(True, OUTBOX_BATCH):
+            try:
+                self._publisher.publish(event)
+            except Exception as exc:  # noqa: BLE001 - a broker failure must not lose the remaining events
+                log.warning("publishing event %s failed, will retry: %s", event.id, exc)
+                break
+            self.orders.mark_published(event.id, self._clock())
+            published += 1
+        return published

@@ -15,20 +15,6 @@ from app.security import sign_webhook
 # watch the tests fail (red), implement until they pass (green). See docs/phase-3.
 # ---------------------------------------------------------------------------
 PENDING: dict[str, str] = {
-    "test_validation.py": "Phase 3 M1 - validation",
-    "test_money.py": "Phase 3 M1 - money and pricing",
-    "test_security.py": "Phase 3 M2 - passwords, tokens, webhook signatures",
-    "test_auth.py": "Phase 3 M2 - AuthService",
-    "test_api_auth.py": "Phase 3 M2 - auth endpoints",
-    "test_catalog.py": "Phase 3 M3 - CatalogService",
-    "test_api_products.py": "Phase 3 M3 - product endpoints",
-    "test_ai.py": "Phase 3 M3 - AI descriptions and search assist",
-    "test_api_ai.py": "Phase 3 M3 - AI endpoints",
-    "test_cart.py": "Phase 3 M4 - CartService and coupons",
-    "test_api_cart.py": "Phase 3 M4 - cart endpoints",
-    "test_orders.py": "Phase 3 M5 - checkout and orders",
-    "test_payments.py": "Phase 3 M5 - payment webhook",
-    "test_api_orders.py": "Phase 3 M5 - order, webhook and outbox endpoints",
     "test_api_integration.py": "Phase 4 - integration tests",
 }
 

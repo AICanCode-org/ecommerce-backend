@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import secrets
 from datetime import timedelta
 
+import bcrypt
+import jwt
+
 from .clock import Clock
-from .models import Principal, User
+from .errors import unauthorized
+from .models import ROLES, Principal, User
 
 log = logging.getLogger("shopflow.security")
 ISSUER = "shopflow"
@@ -24,18 +30,18 @@ class PasswordHasher:
             raise ValueError("BCRYPT_COST must be 4-15")
         self._cost = cost
         # Used when the e-mail is unknown, so a login takes the same time either way.
-        # TODO(phase-3 M2): self._dummy = self.hash("not-a-real-password") once hash() works.
-        self._dummy: str | None = None
+        self._dummy = self.hash("not-a-real-password")
 
     def hash(self, password: str) -> str:
-        # TODO(phase-3 M2): bcrypt with the configured cost (4 in tests, 10 in production).
-        raise NotImplementedError("TODO(phase-3 M2): PasswordHasher.hash")
+        return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(self._cost)).decode("ascii")
 
     def verify(self, password: str, password_hash: str | None) -> bool:
-        # TODO(phase-3 M2): bcrypt check; when password_hash is null (unknown e-mail) verify against
-        #   the dummy hash anyway and return false: same timing either way. A malformed hash -> false,
-        #   never an exception.
-        raise NotImplementedError("TODO(phase-3 M2): PasswordHasher.verify")
+        target = (password_hash or self._dummy).encode("ascii")
+        try:
+            ok = bcrypt.checkpw(password.encode("utf-8"), target)
+        except ValueError:
+            return False
+        return ok and password_hash is not None
 
 
 def resolve_secret(configured: str | None, name: str = "JWT_SECRET") -> str:
@@ -53,29 +59,47 @@ class TokenService:
         self._clock = clock
 
     def issue_access_token(self, user: User) -> str:
-        # TODO(phase-3 M2): HS256 JWT with sub (user id as a string), role, iss=ISSUER, iat and exp
-        #   = now + ACCESS_TOKEN_TTL (1 hour), using the injected clock.
-        raise NotImplementedError("TODO(phase-3 M2): TokenService.issue_access_token")
+        now = self._clock()
+        claims = {
+            "sub": str(user.id),
+            "role": user.role,
+            "iss": ISSUER,
+            "iat": int(now.timestamp()),
+            "exp": int((now + ACCESS_TOKEN_TTL).timestamp()),
+        }
+        return jwt.encode(claims, self._secret, algorithm="HS256")
 
     def verify_access_token(self, token: str) -> Principal:
-        # TODO(phase-3 M2): pin the algorithm to HS256 (reject alg=none / RS256), check the issuer,
-        #   check exp against the injected CLOCK, sub must be ASCII digits and role a known role.
-        #   Anything wrong -> 401 unauthorized 'invalid or expired token'.
-        raise NotImplementedError("TODO(phase-3 M2): TokenService.verify_access_token")
+        try:
+            # algorithms=["HS256"] pins the algorithm: "alg": "none" or RS256 tokens are rejected.
+            # Expiry is checked below against the injected clock, so tests can travel in time.
+            claims = jwt.decode(
+                token,
+                self._secret,
+                algorithms=["HS256"],
+                issuer=ISSUER,
+                options={"verify_exp": False, "verify_iat": False},
+            )
+        except jwt.PyJWTError as exc:
+            raise unauthorized("invalid or expired token") from exc
+        exp, sub, role = claims.get("exp"), claims.get("sub"), claims.get("role")
+        if not isinstance(exp, int) or exp <= self._clock().timestamp():
+            raise unauthorized("invalid or expired token")
+        if not isinstance(sub, str) or not sub.isascii() or not sub.isdigit() or role not in ROLES:
+            raise unauthorized("invalid or expired token")
+        return Principal(user_id=int(sub), role=role)
 
 
 def sign_webhook(secret: str, body: bytes) -> str:
     """The value of the X-Signature header: 'sha256=' + hex HMAC-SHA256 of the RAW request body."""
-    # TODO(phase-3 M2): the X-Signature value: 'sha256=' + hex HMAC-SHA256 of the RAW request body
-    #   with the webhook secret.
-    raise NotImplementedError("TODO(phase-3 M2): sign_webhook")
+    return SIGNATURE_PREFIX + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
 
 def verify_webhook(secret: str, body: bytes, header: str | None) -> bool:
     """Constant-time comparison: a byte-by-byte == leaks how many leading characters were right."""
-    # TODO(phase-3 M2): missing header or no 'sha256=' prefix -> false; otherwise compare with
-    #   sign() in CONSTANT time (never ==).
-    raise NotImplementedError("TODO(phase-3 M2): verify_webhook")
+    if not header or not header.startswith(SIGNATURE_PREFIX):
+        return False
+    return hmac.compare_digest(sign_webhook(secret, body).encode("ascii"), header.strip().encode("utf-8"))
 
 
 def new_payment_id() -> str:

@@ -5,9 +5,12 @@ The messages are part of the contract: the tests (and the other two tracks) expe
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 
-from .errors import validation_error
+from .errors import not_found, validation_error
+from .models import ORDER_STATUSES
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SKU_RE = re.compile(r"^[A-Z0-9][A-Z0-9-]{2,31}$")
@@ -34,156 +37,238 @@ def require_object(payload: object) -> dict:
 
 # ---- accounts ----
 def email(value: object) -> str:
-    # TODO(phase-3 M1): a string (400 'email is required'); trim + lower-case; must match EMAIL_RE
-    #   and be at most 254 characters (400 'email is invalid').
-    raise NotImplementedError("TODO(phase-3 M1): email")
+    if not isinstance(value, str):
+        raise validation_error("email is required")
+    clean = value.strip().lower()
+    if len(clean) > 254 or not EMAIL_RE.match(clean):
+        raise validation_error("email is invalid")
+    return clean
 
 
 def password(value: object) -> str:
-    # TODO(phase-3 M1): a string of at least 8 characters and at most 72 BYTES in UTF-8 (bcrypt
-    #   ignores the rest): 400 otherwise.
-    raise NotImplementedError("TODO(phase-3 M1): password")
+    if not isinstance(value, str):
+        raise validation_error("password is required")
+    if len(value) < 8:
+        raise validation_error("password must be at least 8 characters")
+    if len(value.encode("utf-8")) > 72:
+        raise validation_error("password must be at most 72 bytes")
+    return value
 
 
 def display_name(value: object) -> str:
-    # TODO(phase-3 M1): a string, trimmed, 1-50 characters (count code points, not UTF-16 units).
-    raise NotImplementedError("TODO(phase-3 M1): display_name")
+    if not isinstance(value, str):
+        raise validation_error("displayName is required")
+    clean = value.strip()
+    if not 1 <= len(clean) <= 50:
+        raise validation_error("displayName must be 1-50 characters")
+    return clean
 
 
 # ---- catalog ----
 def sku(value: object) -> str:
-    # TODO(phase-3 M1): a string, trimmed and UPPER-cased, matching SKU_RE (3-32 characters: A-Z,
-    #   0-9 and -).
-    raise NotImplementedError("TODO(phase-3 M1): sku")
+    if not isinstance(value, str):
+        raise validation_error("sku is required")
+    clean = value.strip().upper()
+    if not SKU_RE.match(clean):
+        raise validation_error("sku must be 3-32 characters: A-Z, 0-9 and -")
+    return clean
 
 
 def product_name(value: object) -> str:
-    # TODO(phase-3 M1): a string, trimmed, 1-120 characters.
-    raise NotImplementedError("TODO(phase-3 M1): product_name")
+    if not isinstance(value, str):
+        raise validation_error("name is required")
+    clean = value.strip()
+    if not 1 <= len(clean) <= 120:
+        raise validation_error("name must be 1-120 characters")
+    return clean
 
 
 def description(value: object) -> str:
-    # TODO(phase-3 M1): optional: null/missing -> empty string; otherwise a string (trimmed) of at
-    #   most 2000 characters.
-    raise NotImplementedError("TODO(phase-3 M1): description")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise validation_error("description must be a string")
+    clean = value.strip()
+    if len(clean) > 2000:
+        raise validation_error("description must be at most 2000 characters")
+    return clean
 
 
 def category(value: object) -> str:
-    # TODO(phase-3 M1): a string, trimmed and lower-cased, matching CATEGORY_RE (2-30 characters:
-    #   a-z, 0-9 and -).
-    raise NotImplementedError("TODO(phase-3 M1): category")
+    if not isinstance(value, str):
+        raise validation_error("category is required")
+    clean = value.strip().lower()
+    if not CATEGORY_RE.match(clean):
+        raise validation_error("category must be 2-30 characters: a-z, 0-9 and -")
+    return clean
 
 
 def price_paise(value: object) -> int:
-    # TODO(phase-3 M1): an INTEGER (not a float, not a boolean, not a string) between 1 and
-    #   MAX_PRICE_PAISE. Money is always integer paise (ADR-0001).
-    raise NotImplementedError("TODO(phase-3 M1): price_paise")
+    if not _is_int(value) or not 1 <= value <= MAX_PRICE_PAISE:  # type: ignore[operator]
+        raise validation_error(f"pricePaise must be an integer between 1 and {MAX_PRICE_PAISE}")
+    return value  # type: ignore[return-value]
 
 
 def stock(value: object) -> int:
-    # TODO(phase-3 M1): an integer between 0 and MAX_STOCK (booleans are not integers).
-    raise NotImplementedError("TODO(phase-3 M1): stock")
+    if value is None:
+        return 0
+    if not _is_int(value) or not 0 <= value <= MAX_STOCK:  # type: ignore[operator]
+        raise validation_error(f"stock must be an integer between 0 and {MAX_STOCK}")
+    return value  # type: ignore[return-value]
 
 
 def stock_delta(value: object) -> int:
-    # TODO(phase-3 M1): a non-zero integer between -MAX_STOCK and MAX_STOCK.
-    raise NotImplementedError("TODO(phase-3 M1): stock_delta")
+    if not _is_int(value) or value == 0 or abs(value) > MAX_STOCK:  # type: ignore[arg-type]
+        raise validation_error(f"delta must be a non-zero integer between -{MAX_STOCK} and {MAX_STOCK}")
+    return value  # type: ignore[return-value]
 
 
 def active(value: object) -> bool:
-    # TODO(phase-3 M1): a real boolean: true or false, nothing else.
-    raise NotImplementedError("TODO(phase-3 M1): active")
+    if not isinstance(value, bool):
+        raise validation_error("active must be true or false")
+    return value
 
 
 def version(value: object) -> int:
-    # TODO(phase-3 M1): a positive integer (the version you read; optimistic locking, ADR-0003).
-    raise NotImplementedError("TODO(phase-3 M1): version")
+    if not _is_int(value) or value < 1:  # type: ignore[operator]
+        raise validation_error("version must be a positive integer")
+    return value  # type: ignore[return-value]
 
 
 def keywords(value: object) -> list[str]:
     """Optional hints for an AI description draft: at most 5, each 1-30 characters, de-duplicated."""
-    # TODO(phase-3 M1): optional list (missing -> []); at most 5 strings, each lower-cased + trimmed
-    #   and matching KEYWORD_RE; drop duplicates, keep the order.
-    raise NotImplementedError("TODO(phase-3 M1): keywords")
+    message = "keywords must be a list of at most 5 words (1-30 characters each)"
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise validation_error(message)
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise validation_error(message)
+        clean = " ".join(item.lower().split())
+        if not KEYWORD_RE.match(clean):
+            raise validation_error(message)
+        if clean not in out:
+            out.append(clean)
+    if len(out) > 5:
+        raise validation_error(message)
+    return out
 
 
 # ---- cart + checkout ----
 def quantity(value: object) -> int:
-    # TODO(phase-3 M1): an integer between 1 and MAX_QUANTITY (10).
-    raise NotImplementedError("TODO(phase-3 M1): quantity")
+    if not _is_int(value) or not 1 <= value <= MAX_QUANTITY:  # type: ignore[operator]
+        raise validation_error(f"quantity must be an integer between 1 and {MAX_QUANTITY}")
+    return value  # type: ignore[return-value]
 
 
 def coupon_code(value: object) -> str:
-    # TODO(phase-3 M1): a string (400 'code is required'), trimmed + UPPER-cased, matching COUPON_RE
-    #   (400 'code is invalid').
-    raise NotImplementedError("TODO(phase-3 M1): coupon_code")
+    if not isinstance(value, str):
+        raise validation_error("code is required")
+    clean = value.strip().upper()
+    if not COUPON_RE.match(clean):
+        raise validation_error("code is invalid")
+    return clean
 
 
 def idempotency_key(value: str | None) -> str:
-    # TODO(phase-3 M1): the Idempotency-Key header: missing/blank -> 400 'Idempotency-Key header is
-    #   required'; must match IDEMPOTENCY_KEY_RE (8-64 characters).
-    raise NotImplementedError("TODO(phase-3 M1): idempotency_key")
+    if not value:
+        raise validation_error("Idempotency-Key header is required")
+    if not IDEMPOTENCY_KEY_RE.match(value):
+        raise validation_error("Idempotency-Key must be 8-64 characters: A-Z, a-z, 0-9, _ and -")
+    return value
 
 
 def order_status_target(value: object) -> str:
-    # TODO(phase-3 M1): only SHIPPED or DELIVERED can be set by an admin (cancel has its own
-    #   endpoint, PAID comes from the webhook).
-    raise NotImplementedError("TODO(phase-3 M1): order_status_target")
+    if value not in ("SHIPPED", "DELIVERED"):
+        raise validation_error("status must be SHIPPED or DELIVERED")
+    return value  # type: ignore[return-value]
 
 
 # ---- query strings ----
 def limit(value: str | None, default: int = 20, maximum: int = 50) -> int:
-    # TODO(phase-3 M1): a query string: missing -> the default (20); ASCII digits only, 1..maximum
-    #   (50); anything else 400.
-    raise NotImplementedError("TODO(phase-3 M1): limit")
+    if value is None:
+        return default
+    if not DIGITS_RE.match(value) or not 1 <= int(value) <= maximum:
+        raise validation_error(f"limit must be an integer between 1 and {maximum}")
+    return int(value)
 
 
 def price_filter(value: str | None, name: str) -> int | None:
-    # TODO(phase-3 M1): a query string: missing -> null; ASCII digits only, 0..MAX_PRICE_PAISE, else
-    #   400 naming the parameter.
-    raise NotImplementedError("TODO(phase-3 M1): price_filter")
+    if value is None or value == "":
+        return None
+    if not DIGITS_RE.match(value) or int(value) > MAX_PRICE_PAISE:
+        raise validation_error(f"{name} must be an integer between 0 and {MAX_PRICE_PAISE} (paise)")
+    return int(value)
 
 
 def bool_filter(value: str | None, name: str) -> bool | None:
-    # TODO(phase-3 M1): a query string: missing -> null; exactly 'true' or 'false', else 400 naming
-    #   the parameter.
-    raise NotImplementedError("TODO(phase-3 M1): bool_filter")
+    if value is None or value == "":
+        return None
+    if value not in ("true", "false"):
+        raise validation_error(f"{name} must be true or false")
+    return value == "true"
 
 
 def search_query(value: str | None) -> str | None:
-    # TODO(phase-3 M1): missing or blank -> null; trimmed, at most 100 characters.
-    raise NotImplementedError("TODO(phase-3 M1): search_query")
+    if value is None:
+        return None
+    clean = value.strip()
+    if not clean:
+        return None
+    if len(clean) > 100:
+        raise validation_error("q must be at most 100 characters")
+    return clean
 
 
 def assist_query(value: str | None) -> str:
-    # TODO(phase-3 M1): required (400 'q is required'), trimmed, at most 200 characters.
-    raise NotImplementedError("TODO(phase-3 M1): assist_query")
+    clean = (value or "").strip()
+    if not clean:
+        raise validation_error("q is required")
+    if len(clean) > 200:
+        raise validation_error("q must be at most 200 characters")
+    return clean
 
 
 def category_filter(value: str | None) -> str | None:
-    # TODO(phase-3 M1): missing -> null; lower-cased, must match CATEGORY_RE.
-    raise NotImplementedError("TODO(phase-3 M1): category_filter")
+    if value is None or value == "":
+        return None
+    clean = value.lower()
+    if not CATEGORY_RE.match(clean):
+        raise validation_error("category is invalid")
+    return clean
 
 
 def order_status_filter(value: str | None) -> str | None:
-    # TODO(phase-3 M1): missing -> null; upper-cased, one of ORDER_STATUSES.
-    raise NotImplementedError("TODO(phase-3 M1): order_status_filter")
+    if value is None or value == "":
+        return None
+    if value not in ORDER_STATUSES:
+        raise validation_error(f"status must be one of {', '.join(ORDER_STATUSES)}")
+    return value
 
 
 def path_id(value: str, what: str) -> int:
     """An id that cannot exist is a 404, not a 400: /orders/abc is simply not there."""
-    # TODO(phase-3 M1): a path segment: ASCII digits only and a positive id that fits in 63 bits;
-    #   anything else is 404 for 'what' (not 400: /orders/abc simply does not exist).
-    raise NotImplementedError("TODO(phase-3 M1): path_id")
+    if not DIGITS_RE.match(value) or len(value) > 18:
+        raise not_found(what)
+    return int(value)
 
 
 # ---- keyset cursor (opaque to clients) ----
 def encode_cursor(last_id: int) -> str:
-    # TODO(phase-3 M3): opaque cursor: base64url (no padding) of 'p' + the last id shown.
-    raise NotImplementedError("TODO(phase-3 M3): encode_cursor")
+    return base64.urlsafe_b64encode(f"p{last_id}".encode("ascii")).decode("ascii").rstrip("=")
 
 
 def decode_cursor(value: str | None) -> int | None:
-    # TODO(phase-3 M3): missing -> null; must match CURSOR_RE, decode base64url, be 'p' + digits
-    #   with a positive id; anything else 400 'cursor is invalid'.
-    raise NotImplementedError("TODO(phase-3 M3): decode_cursor")
+    if value is None or value == "":
+        return None
+    if not CURSOR_RE.match(value):
+        raise validation_error("cursor is invalid")
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("ascii")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise validation_error("cursor is invalid") from exc
+    if not raw.startswith("p") or not DIGITS_RE.match(raw[1:]) or len(raw) > 19:
+        raise validation_error("cursor is invalid")
+    return int(raw[1:])

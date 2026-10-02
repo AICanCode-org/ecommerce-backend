@@ -13,6 +13,7 @@ Ollama locally, or a free Gemini/Groq key.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Protocol
 import httpx
 
 from .models import Product, SearchFilters
+from .text import collapse, first_sentence, shorten
 
 log = logging.getLogger("shopflow.ai")
 DESCRIPTION_MAX = 600
@@ -89,11 +91,14 @@ class TemplateWriter:
     """Deterministic and offline. The wording is part of the spec (the tests check it exactly)."""
 
     def write(self, product: Product, keywords: list[str]) -> str:
-        # TODO(phase-3 M3): deterministic, the wording is part of the spec: '<name> from our
-        #   <category> range.' + first sentence of the description + ' Highlights: a, b.' (if
-        #   keywords) + ' In stock and ready to ship.' or ' Currently out of stock.'; shorten to
-        #   DESCRIPTION_MAX.
-        raise NotImplementedError("TODO(phase-3 M3): TemplateWriter.write")
+        text = f"{product.name} from our {product.category} range."
+        sentence = first_sentence(product.description)
+        if sentence:
+            text += f" {sentence}"
+        if keywords:
+            text += f" Highlights: {', '.join(keywords)}."
+        text += " In stock and ready to ship." if product.stock > 0 else " Currently out of stock."
+        return shorten(text, DESCRIPTION_MAX)
 
 
 DESCRIPTION_PROMPT = (
@@ -108,10 +113,14 @@ class LlmWriter:
         self._client = client
 
     def write(self, product: Product, keywords: list[str]) -> str:
-        # TODO(phase-3 M3): send DESCRIPTION_PROMPT + the product facts between <product> tags
-        #   (description capped at 1000 characters); collapse whitespace; empty answer -> error;
-        #   shorten to DESCRIPTION_MAX. Let errors propagate: DescriptionService falls back.
-        raise NotImplementedError("TODO(phase-3 M3): LlmWriter.write")
+        facts = (
+            f"<product>\nName: {product.name}\nCategory: {product.category}\n"
+            f"Current description: {product.description[:1000]}\nKeywords: {', '.join(keywords)}\n</product>"
+        )
+        text = collapse(self._client.chat(DESCRIPTION_PROMPT, facts, 200))
+        if not text:
+            raise ValueError("empty description")
+        return shorten(text, DESCRIPTION_MAX)
 
 
 @dataclass(frozen=True)
@@ -127,9 +136,13 @@ class DescriptionService:
         self._llm = llm
 
     def draft(self, product: Product, keywords: list[str]) -> DraftResult:
-        # TODO(phase-3 M3): LLM if configured; ANY exception -> template with fallback=true (log a
-        #   warning). No LLM -> template, fallback=false.
-        raise NotImplementedError("TODO(phase-3 M3): DescriptionService.draft")
+        if self._llm is not None:
+            try:
+                return DraftResult("llm", False, self._llm.write(product, keywords))
+            except Exception as exc:  # noqa: BLE001 - any LLM failure -> graceful fallback
+                log.warning("LLM description failed, using the template: %s", exc)
+                return DraftResult("template", True, self._template.write(product, keywords))
+        return DraftResult("template", False, self._template.write(product, keywords))
 
 
 # ---- search assist ------------------------------------------------------------------------------
@@ -143,21 +156,47 @@ def _paise(rupees: int) -> int:
 
 def match_category(token: str, categories: list[str]) -> str | None:
     """'shoe' and 'shoes' both match the category 'shoes'; 'bags' matches 'bag'."""
-    # TODO(phase-3 M3): 'shoe' and 'shoes' both match the category 'shoes'; 'bags' matches 'bag':
-    #   token == c, token + 's' == c, or token minus a trailing 's' == c.
-    raise NotImplementedError("TODO(phase-3 M3): match_category")
+    for c in categories:
+        if token == c or token + "s" == c or (token.endswith("s") and token[:-1] == c):
+            return c
+    return None
 
 
 class RuleParser:
     """Deterministic and offline. The patterns and their order are part of the spec."""
 
     def parse(self, query: str, categories: list[str]) -> SearchFilters:
-        # TODO(phase-3 M3): deterministic, the order is part of the spec: lower-case, drop ₹ and
-        #   thousands separators and money words, '3k' -> 3000; then between/range, under/max,
-        #   over/min (whole rupees -> paise, capped at MAX_RUPEES), 'in stock'; the first token that
-        #   matches a category is the category; other tokens (not stopwords, not numbers, unique, <=
-        #   30 chars) are terms, at most MAX_TERMS.
-        raise NotImplementedError("TODO(phase-3 M3): RuleParser.parse")
+        text = query.lower().replace("₹", " ")
+        text = _THOUSANDS.sub("", text)
+        text = _MONEY_WORDS.sub(" ", text)
+        text = _K.sub(lambda m: str(int(m.group(1)) * 1000), text)
+        lo = hi = None
+        m = _BETWEEN.search(text) or _RANGE.search(text)
+        if m:
+            a, b = sorted((int(m.group(1)), int(m.group(2))))
+            lo, hi = _paise(a), _paise(b)
+            text = text[: m.start()] + " " + text[m.end() :]
+        m = _MAX.search(text)
+        if m:
+            hi = _paise(int(m.group(1)))
+            text = text[: m.start()] + " " + text[m.end() :]
+        m = _MIN.search(text)
+        if m:
+            lo = _paise(int(m.group(1)))
+            text = text[: m.start()] + " " + text[m.end() :]
+        in_stock = None
+        m = _IN_STOCK.search(text)
+        if m:
+            in_stock = True
+            text = text[: m.start()] + " " + text[m.end() :]
+        category, terms = None, []
+        for token in _TOKEN.findall(text):
+            found = match_category(token, categories) if category is None else None
+            if found:
+                category = found
+            elif token not in STOPWORDS and not token.isdigit() and token not in terms and len(token) <= 30:
+                terms.append(token)
+        return SearchFilters(terms[:MAX_TERMS], category, lo, hi, in_stock)
 
 
 SEARCH_PROMPT = (
@@ -169,18 +208,40 @@ SEARCH_PROMPT = (
 
 
 def _price(value: object) -> int | None:
-    # TODO(phase-3 M3): helper for parse_filters: null stays null; otherwise an integer number of
-    #   rupees 0..MAX_RUPEES (booleans are not numbers) -> paise, else throw.
-    raise NotImplementedError("TODO(phase-3 M3): _price")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_RUPEES:
+        raise ValueError(f"price out of range: {value!r}")
+    return value * 100
 
 
 def parse_filters(raw: str, categories: list[str]) -> SearchFilters:
     """Validate the model's answer like untrusted user input. Anything unexpected raises -> fallback."""
-    # TODO(phase-3 M3): treat the model's answer like untrusted input: find the JSON object; terms a
-    #   list of <= 5 words matching _TERM (lower-cased, unique); category null or one of the allowed
-    #   ones; minPrice/maxPrice whole rupees 0..MAX_RUPEES (not booleans) and min <= max; inStock
-    #   true/false/null. Anything else -> throw (the caller falls back).
-    raise NotImplementedError("TODO(phase-3 M3): parse_filters")
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("no JSON object in LLM answer")
+    data = json.loads(raw[start : end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    terms = data.get("terms") or []
+    if not isinstance(terms, list) or len(terms) > MAX_TERMS:
+        raise ValueError("terms must be a list of at most 5 words")
+    clean: list[str] = []
+    for t in terms:
+        if not isinstance(t, str) or not _TERM.match(t.lower()):
+            raise ValueError(f"bad term {t!r}")
+        if t.lower() not in clean:
+            clean.append(t.lower())
+    category = data.get("category")
+    if category is not None and category not in categories:
+        raise ValueError(f"unknown category {category!r}")
+    lo, hi = _price(data.get("minPrice")), _price(data.get("maxPrice"))
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError("minPrice > maxPrice")
+    in_stock = data.get("inStock")
+    if in_stock not in (None, True, False):
+        raise ValueError("inStock must be true or null")
+    return SearchFilters(clean, category, lo, hi, True if in_stock else None)
 
 
 class LlmParser:
@@ -188,9 +249,8 @@ class LlmParser:
         self._client = client
 
     def parse(self, query: str, categories: list[str]) -> SearchFilters:
-        # TODO(phase-3 M3): system = the search prompt with the allowed categories, user = the query
-        #   between <query> tags; return parse_filters(answer).
-        raise NotImplementedError("TODO(phase-3 M3): LlmParser.parse")
+        system = SEARCH_PROMPT.format(categories=", ".join(categories) or "(none)")
+        return parse_filters(self._client.chat(system, f"<query>\n{query}\n</query>", 120), categories)
 
 
 @dataclass(frozen=True)
@@ -206,6 +266,10 @@ class SearchAssistService:
         self._llm = llm
 
     def interpret(self, query: str, categories: list[str]) -> AssistResult:
-        # TODO(phase-3 M3): LLM if configured; ANY exception -> rules with fallback=true (log a
-        #   warning). No LLM -> rules, fallback=false.
-        raise NotImplementedError("TODO(phase-3 M3): SearchAssistService.interpret")
+        if self._llm is not None:
+            try:
+                return AssistResult("llm", False, self._llm.parse(query, categories))
+            except Exception as exc:  # noqa: BLE001 - any LLM failure -> graceful fallback
+                log.warning("LLM search assist failed, using the rules: %s", exc)
+                return AssistResult("rules", True, self._rules.parse(query, categories))
+        return AssistResult("rules", False, self._rules.parse(query, categories))
