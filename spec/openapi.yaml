@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ShopFlow API
-  version: 1.0.0
+  version: 1.1.0
   summary: An e-commerce backend with a catalog, carts, idempotent checkout, payments and AI search (AiCanCode course project).
   description: |
     The shared HTTP contract for the Java, Python and TypeScript tracks. All three implement exactly
@@ -18,6 +18,9 @@ info:
     * Checkout needs an `Idempotency-Key` header: the same key always returns the same order (ADR-0004).
     * Payments come from a fake provider ("fakepay") through a signed webhook: `X-Signature: sha256=<hex>`,
       the HMAC-SHA256 of the raw body with `PAYMENT_WEBHOOK_SECRET`.
+    * v1.1.0: every response carries `X-Request-ID` (a safe incoming value is echoed, otherwise a UUID);
+      `GET /metrics`; orders have a 15-minute payment window (`expiresAt`, V2 migration) and
+      `POST /api/v1/admin/orders/expire` cancels unpaid orders whose window closed.
   license:
     name: MIT
     identifier: MIT
@@ -52,6 +55,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus counters (v1.1.0)
+      description: |
+        Counters (identical names in every track): `shopflow_users_registered_total`,
+        `shopflow_logins_failed_total`, `shopflow_orders_placed_total`,
+        `shopflow_checkout_replays_total`, `shopflow_webhooks_duplicate_total`,
+        `shopflow_orders_expired_total`, `shopflow_ai_fallback_total`,
+        `shopflow_llm_short_circuits_total`.
+      operationId: metrics
+      responses:
+        "200":
+          description: Prometheus text exposition format 0.0.4
+          content:
+            text/plain:
+              schema: { type: string }
+              example: |
+                # HELP shopflow_orders_placed_total Orders created by checkout (idempotent replays not counted).
+                # TYPE shopflow_orders_placed_total counter
+                shopflow_orders_placed_total 3
 
   /api/v1/auth/register:
     post:
@@ -555,6 +580,29 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/InvalidTransition" }
 
+  /api/v1/admin/orders/expire:
+    post:
+      tags: [admin]
+      summary: Cancel unpaid orders whose payment window closed (ADMIN, v1.1.0)
+      description: |
+        Every PENDING_PAYMENT order with `expiresAt <= now` becomes CANCELLED: its stock goes back and an
+        `order.cancelled` event is written. Safe to run any time (e.g. from a cron job): an order paid a
+        moment ago is skipped. A payment that arrives later is refunded (`refund.requested`).
+      operationId: expireOrders
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: How many orders were cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [expired]
+                properties:
+                  expired: { type: integer, minimum: 0 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /api/v1/payments/webhook:
     post:
       tags: [payments]
@@ -879,7 +927,7 @@ components:
 
     Order:
       type: object
-      required: [id, userId, status, items, subtotalPaise, discountPaise, shippingPaise, totalPaise, total, couponCode, payment, createdAt, updatedAt]
+      required: [id, userId, status, items, subtotalPaise, discountPaise, shippingPaise, totalPaise, total, couponCode, payment, createdAt, updatedAt, expiresAt]
       properties:
         id: { type: integer }
         userId: { type: integer }
@@ -911,6 +959,7 @@ components:
             amountPaise: { type: integer }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, description: "v1.1.0: end of the 15-minute payment window" }
 
     OrderList:
       type: object
