@@ -1,7 +1,30 @@
-# ShopFlow local stack (starter): PostgreSQL for running a track on your machine.
-#   docker compose up -d postgres      then   cd tracks/<track> && make run
-# In Phase 6 you add the app itself as a service (one profile per track).
+# ShopFlow local stack. Start the database only:  docker compose up -d postgres
+# Start the database + one app track:             docker compose --profile python up --build
 name: shopflow
+
+x-app-env: &app-env
+  PORT: "8080"
+  DATABASE_URL: postgresql://shopflow:shopflow@postgres:5432/shopflow
+  MIGRATIONS_DIR: /app/migrations
+  # Local development values only. A real deployment sets its own secrets and admin password.
+  JWT_SECRET: ${JWT_SECRET:-local-dev-secret-change-me-0123456789abcdef}
+  BCRYPT_COST: ${BCRYPT_COST:-10}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@shopflow.local}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin-password-123}
+  PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-local-webhook-secret-change-me-0123456789}
+  AI_PROVIDER: ${AI_PROVIDER:-offline}
+  LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-llama3.2:1b}
+  LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-5000}
+
+x-app-common: &app-common
+  environment: *app-env
+  ports:
+    - "${APP_PORT:-8080}:8080"
+  depends_on:
+    postgres: { condition: service_healthy }
+  restart: unless-stopped
 
 services:
   postgres:
@@ -21,9 +44,26 @@ services:
       timeout: 3s
       retries: 20
 
-  # Optional local LLM (Phase 3 M3):  docker compose --profile ollama up -d
-  # then: docker compose exec ollama ollama pull llama3.2:1b  and run your track with
-  #       AI_PROVIDER=llm LLM_BASE_URL=http://localhost:11434/v1
+  app-java:
+    <<: *app-common
+    profiles: ["java"]
+    build: { context: ., dockerfile: tracks/java/Dockerfile }
+    image: shopflow-java:local
+
+  app-python:
+    <<: *app-common
+    profiles: ["python"]
+    build: { context: ., dockerfile: tracks/python/Dockerfile }
+    image: shopflow-python:local
+
+  app-typescript:
+    <<: *app-common
+    profiles: ["typescript"]
+    build: { context: ., dockerfile: tracks/typescript/Dockerfile }
+    image: shopflow-typescript:local
+
+  # Optional local LLM:  docker compose --profile python --profile ollama up -d
+  # then: docker compose exec ollama ollama pull llama3.2:1b  and set AI_PROVIDER=llm
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest

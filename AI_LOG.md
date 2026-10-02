@@ -96,3 +96,35 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   `TODO(phase-3 Mx)` hint was compared with the tests of its class.
 * **Time saved / lost (honest guess):** neutral.
 * **What I learned:** "unused" is relative to the current state of the code. A starter is deliberately incomplete.
+
+### 2026-10-02 · Phase 6 · Porting the smoke test from another project
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Adapt our blog API smoke test (bash + curl only) to ShopFlow: registration, roles, products with optimistic locking, search, AI, cart and coupons, idempotent checkout, signed webhooks, cancel and refund.
+* **What it produced:** a 73-check script that reuses the first-occurrence JSON helpers (`grep -o … | head -1`;
+  a greedy `sed` would return the *last* `"id"` in a body, and an order body has many). Two gaps in review:
+  the webhook checks need to *sign* their bodies, so the script needs the app's `PAYMENT_WEBHOOK_SECRET`; and
+  against a live URL without that secret or admin credentials, the payment checks must be skipped, not failed.
+* **What I kept / changed / rejected and why:** added `SMOKE_WEBHOOK_SECRET` (default: the local Compose value)
+  and passed it from a GitHub secret in `deploy.yml`; `SMOKE_ALLOW_NO_ADMIN=true` skips everything that needs
+  the admin. Signing uses `openssl dgst -sha256 -hmac` over the exact bytes sent, so the script needs no
+  language runtime. Every user, SKU, search word, idempotency key and event id carries a unique run id, so
+  re-runs never collide.
+* **How I verified it:** the script against the v1.0 images of all three tracks (all checks pass), again
+  with `AI_PROVIDER=llm` pointing at an unreachable address and `EXPECT_FALLBACK=true`, and
+  `shellcheck --severity=error`.
+* **Time saved / lost (honest guess):** saved ~1 h.
+* **What I learned:** a black-box test of a signed endpoint is only as portable as its access to the secret. Decide where that secret lives before you need it in CI.
+
+### 2026-10-02 · Phase 6 · Where should `deploy.yml` live?
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Should the deploy workflow already be on `main` (the starter) so students see it early?
+* **What it produced:** a version that lived on `main` and skipped tracks without a Dockerfile with a notice.
+* **What I kept / changed / rejected and why:** rejected for the course. Students write `deploy.yml`
+  themselves in Phase 6, the sibling projects (SnapLink, DevBlog) keep it on `solution` only, and a workflow
+  that exists but does nothing on `main` is confusing. The file arrives with the Dockerfiles at `phase-6-end`.
+* **How I verified it:** `actionlint` (with shellcheck) on every workflow; `git ls-tree main .github/workflows`
+  lists only `ci.yml`.
+* **Time saved / lost (honest guess):** neutral.
+* **What I learned:** consistency across sibling projects is a feature for learners, not just for maintainers.
