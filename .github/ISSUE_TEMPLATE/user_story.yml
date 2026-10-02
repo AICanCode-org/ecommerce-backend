@@ -1,0 +1,33 @@
+name: User story
+description: A small, testable slice of user value (Phase 1 creates these)
+title: "US-<n>: <short title>"
+labels: ["user-story"]
+body:
+  - type: textarea
+    id: story
+    attributes:
+      label: Story
+      description: As a <persona>, I want <capability>, so that <benefit>.
+      placeholder: As Priya (shopper), I want my cart to survive closing the browser, so that I can finish buying later.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (Given / When / Then)
+      placeholder: |
+        - Given I have 2 items in my cart, when I sign in on another device, then I see the same 2 items
+        - Given another customer's order id, when I request it, then I get 404 (not 403)
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Phase 3 milestone
+      options: ["M1 validation + money", "M2 auth (passwords, JWT, roles, webhook signatures)", "M3 catalog + search + AI", "M4 cart + coupons", "M5 checkout, orders, payments, outbox", "Later"]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / out of scope

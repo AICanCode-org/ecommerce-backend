@@ -1,0 +1,44 @@
+{
+  "cms_file": "ecommerce-backend",
+  "slug": "ecommerce-backend",
+  "title": "ShopFlow: E-commerce Backend with Idempotent Checkout, Payments and AI Search",
+  "tagline": "Build an online-shop backend that never oversells, never charges twice and never loses a payment, with AI as your pair programmer",
+  "description": "Over nine phases you build ShopFlow like a professional team: requirements and threats, design with ADRs, a test-first implementation of a product catalog with full-text search, a server-side cart with coupons, money as integer paise, checkout with an Idempotency-Key and a guarded stock decrement that cannot oversell, orders with a state machine, HMAC-signed and de-duplicated payment webhooks, a transactional outbox, AI search assist and product description drafts with offline fallbacks, CI/CD with GitHub Actions, Docker, optional free-tier deployment, observability, a payment-window migration and a retrospective. Pick Java, Python or TypeScript; the spec, database and tests are shared. Everything runs on your laptop, and the AI features work offline.",
+  "difficulty": "intermediate",
+  "tech_stack": ["PostgreSQL", "JWT", "bcrypt", "HMAC-SHA256", "Docker", "GitHub Actions", "OpenAPI"],
+  "tracks": [
+    {"id": "java", "label": "Java", "tech_stack": ["Java 21", "Spring Boot", "JDBC", "Nimbus JOSE + JWT", "JUnit 5", "JaCoCo"], "folder": "tracks/java"},
+    {"id": "python", "label": "Python", "tech_stack": ["Python 3.11+", "FastAPI", "psycopg 3", "PyJWT", "bcrypt", "pytest"], "folder": "tracks/python"},
+    {"id": "typescript", "label": "TypeScript", "tech_stack": ["Node.js 20+", "TypeScript", "Fastify", "pg", "jose", "Vitest"], "folder": "tracks/typescript"}
+  ],
+  "prerequisites": [
+    {"title": "Git and the command line basics", "url": null},
+    {"title": "One of: Java, Python or TypeScript fundamentals", "url": null},
+    {"title": "REST APIs and HTTP status codes", "url": null},
+    {"title": "Basic SQL (SELECT, INSERT, UPDATE, transactions)", "url": null}
+  ],
+  "outcomes": [
+    "Turn a shop brief into testable requirements, user stories and a threat list (forged webhooks, double checkout, overselling, price tampering)",
+    "Design a REST API contract-first (OpenAPI) with a PostgreSQL schema, an order state machine and ADRs",
+    "Handle money correctly: integer paise end to end, exact coupon maths, database CHECK constraints",
+    "Prevent overselling with a guarded stock decrement and prove it with parallel checkout tests",
+    "Make checkout idempotent with an Idempotency-Key and payment webhooks safe with HMAC signatures and event de-duplication",
+    "Never lose an event between the database and a broker with a transactional outbox",
+    "Add AI search assist and description drafts whose output is validated and that fall back offline",
+    "Build CI/CD with GitHub Actions: matrix, caching, reusable workflows, service containers, GHCR",
+    "Add request IDs, JSON logs, metrics, a circuit breaker and an expand-only migration after a game day and a blameless post-mortem",
+    "Use AI assistants deliberately and verify every output"
+  ],
+  "ai_feature": "AI search assist (natural language to validated catalog filters) and product description drafts for the owner: offline rules/template by default, optional Ollama or a free Gemini/Groq key; checkout never depends on the AI",
+  "requires_paid_services": false,
+  "access": {"default": "pro", "plans": ["pro", "elite", "campus"], "free_phases": [0]},
+  "repo": {
+    "url": "https://github.com/AICanCode-org/ecommerce-backend",
+    "starter_ref": "main",
+    "solution_ref": "solution",
+    "phase_tags": ["phase-0-end", "phase-1-end", "phase-2-end", "phase-3-end", "phase-4-end", "phase-5-end", "phase-6-end", "phase-7-end", "phase-8-end"],
+    "releases": ["v1.0.0", "v1.1.0"]
+  },
+  "live_demo_url": null,
+  "portfolio_blurb": "Built ShopFlow, an e-commerce REST API: money as integer paise, a guarded stock decrement proven by parallel checkout tests (no overselling), idempotent checkout with Idempotency-Key, HMAC-signed and de-duplicated payment webhooks, a transactional outbox, optimistic locking, PostgreSQL full-text search with AI search assist and offline fallback, >=85 % test coverage, GitHub Actions CI/CD to GHCR, Docker, JSON logs, metrics, a circuit breaker added after a game day and an expand-only payment-window migration."
+}

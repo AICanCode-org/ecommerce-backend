@@ -1,0 +1,937 @@
+openapi: 3.1.0
+info:
+  title: ShopFlow API
+  version: 1.0.0
+  summary: An e-commerce backend with a catalog, carts, idempotent checkout, payments and AI search (AiCanCode course project).
+  description: |
+    The shared HTTP contract for the Java, Python and TypeScript tracks. All three implement exactly
+    this, and the same black-box smoke test (`scripts/smoke-test.sh`) runs against each of them.
+
+    * Money is always an integer number of **paise** (1 rupee = 100 paise), never a float. Fields that
+      end in `Paise` are integers; the matching display string (`price`, `total`) is formatted for India,
+      e.g. `₹1,23,456.00`.
+    * Errors use RFC 9457 `application/problem+json` with `type` = `https://shopflow.example/problems/<slug>`.
+    * Timestamps are ISO-8601 UTC with millisecond precision and a `Z` suffix.
+    * Authenticated endpoints need `Authorization: Bearer <accessToken>` (a JWT, HS256, 1 hour).
+    * Roles: `CUSTOMER` (default at registration) and `ADMIN` (catalog, orders, outbox). The first admin is
+      created from `ADMIN_EMAIL` / `ADMIN_PASSWORD` at startup.
+    * Checkout needs an `Idempotency-Key` header: the same key always returns the same order (ADR-0004).
+    * Payments come from a fake provider ("fakepay") through a signed webhook: `X-Signature: sha256=<hex>`,
+      the HMAC-SHA256 of the raw body with `PAYMENT_WEBHOOK_SECRET`.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:8080
+    description: Local (any track)
+tags:
+  - name: auth
+  - name: catalog
+  - name: ai
+  - name: cart
+  - name: orders
+  - name: payments
+  - name: admin
+  - name: ops
+
+paths:
+  /health:
+    get:
+      tags: [ops]
+      summary: Liveness and database health
+      operationId: health
+      responses:
+        "200":
+          description: The app and its database are up
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: UP, checks: { database: UP } }
+        "503":
+          description: The database is unreachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Create an account (always role CUSTOMER)
+      description: Any `role` in the body is ignored. E-mails are stored lower-case and must be unique.
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "201":
+          description: Account created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409":
+          description: The e-mail is already registered (`email-taken`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange e-mail + password for an access token
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401":
+          description: Wrong e-mail or password (`invalid-credentials`, the same answer for both)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/me:
+    get:
+      tags: [auth]
+      summary: The signed-in user
+      operationId: me
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The user behind the token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/products:
+    get:
+      tags: [catalog]
+      summary: Browse and search active products (keyset pagination)
+      description: |
+        `q` is PostgreSQL full-text search over name + description (English stemming: "shoe" finds "Shoes").
+        Results are ordered by id. Pass `nextCursor` back as `cursor` for the next page; it is opaque.
+      operationId: listProducts
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: category, in: query, schema: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,29}$" } }
+        - { name: minPricePaise, in: query, schema: { type: integer, minimum: 0, maximum: 100000000 } }
+        - { name: maxPricePaise, in: query, schema: { type: integer, minimum: 0, maximum: 100000000 } }
+        - { name: inStock, in: query, schema: { type: boolean } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 40 } }
+      responses:
+        "200":
+          description: One page of products
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ProductItem" } }
+                  nextCursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+    post:
+      tags: [catalog]
+      summary: Create a product (ADMIN)
+      operationId: createProduct
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateProductRequest" }
+      responses:
+        "201":
+          description: Created
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/products/{sku}" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: The SKU exists (`sku-taken`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/products/{sku}:
+    parameters:
+      - { $ref: "#/components/parameters/Sku" }
+    get:
+      tags: [catalog]
+      summary: One product (inactive products are 404 except for admins)
+      operationId: getProduct
+      security: [{}, { bearer: [] }]
+      responses:
+        "200":
+          description: The product
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [catalog]
+      summary: Edit a product (ADMIN, optimistic locking)
+      description: |
+        Send the `version` you read. If someone saved in between, the answer is 409 `version-conflict`
+        and nothing changes (ADR-0003). Stock is NOT edited here: use POST /stock.
+      operationId: updateProduct
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProductRequest" }
+      responses:
+        "200":
+          description: Saved (version + 1)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Stale `version` (`version-conflict`, the detail names the current version)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/products/{sku}/stock:
+    parameters:
+      - { $ref: "#/components/parameters/Sku" }
+    post:
+      tags: [catalog]
+      summary: Move stock by a delta (ADMIN) in one guarded statement
+      operationId: adjustStock
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [delta]
+              properties:
+                delta: { type: integer, minimum: -1000000, maximum: 1000000, not: { const: 0 } }
+      responses:
+        "200":
+          description: The product with its new stock (the version does not change)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Stock would go below 0 (`insufficient-stock`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/categories:
+    get:
+      tags: [catalog]
+      summary: Categories with their number of active products
+      operationId: categories
+      responses:
+        "200":
+          description: Sorted by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, products]
+                      properties:
+                        name: { type: string }
+                        products: { type: integer }
+
+  /api/v1/products/{sku}/description-draft:
+    parameters:
+      - { $ref: "#/components/parameters/Sku" }
+    post:
+      tags: [ai]
+      summary: Draft a product description (ADMIN). Never saved automatically.
+      description: |
+        `TemplateWriter` (offline, deterministic) or an LLM. Any LLM failure falls back to the template with
+        `fallback: true`. The admin reads the draft and saves it with PATCH (human in the loop).
+      operationId: descriptionDraft
+      security: [{ bearer: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keywords:
+                  type: array
+                  maxItems: 5
+                  items: { type: string, pattern: "^[a-z0-9][a-z0-9 -]{0,29}$" }
+      responses:
+        "200":
+          description: A draft
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DescriptionDraft" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/search/assist:
+    get:
+      tags: [ai]
+      summary: Natural-language search ("running shoes under 3000 in stock")
+      description: |
+        The query is turned into the same filters as GET /products (`RuleParser` offline, or an LLM whose
+        answer is validated like user input: it never writes SQL). Prices in the query are rupees; the
+        filters are paise. Any LLM failure falls back to the rules with `fallback: true`.
+      operationId: searchAssist
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+      responses:
+        "200":
+          description: The interpreted filters and up to 20 matching products
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchAssist" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/cart:
+    get:
+      tags: [cart]
+      summary: The signed-in customer's cart, priced now
+      operationId: getCart
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The cart
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/cart/items/{sku}:
+    parameters:
+      - { $ref: "#/components/parameters/Sku" }
+    put:
+      tags: [cart]
+      summary: Set the quantity of one product (1-10; at most 20 different products)
+      operationId: setCartItem
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity: { type: integer, minimum: 1, maximum: 10 }
+      responses:
+        "200":
+          description: The updated cart
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Not that many in stock (`insufficient-stock`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    delete:
+      tags: [cart]
+      summary: Remove one product from the cart (idempotent)
+      operationId: removeCartItem
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The updated cart
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/cart/coupon:
+    put:
+      tags: [cart]
+      summary: Apply a coupon (demo codes SAVE10 and FLAT100)
+      operationId: applyCoupon
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: "^[A-Za-z0-9]{3,20}$", description: "Case-insensitive" }
+      responses:
+        "200":
+          description: The cart; `couponApplied` is false while the subtotal is below the coupon's minimum
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [cart]
+      summary: Remove the coupon
+      operationId: removeCoupon
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The cart
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cart" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/checkout:
+    post:
+      tags: [orders]
+      summary: Turn the cart into an order (idempotent, all-or-nothing stock)
+      description: |
+        ONE transaction: guarded stock decrements, the order and its lines (prices snapshotted), a PENDING
+        payment, an `order.placed` outbox event, and an empty cart. Not enough stock for any line: nothing is
+        written. The same `Idempotency-Key` returns the same order with 200 + `Idempotent-Replayed: true`.
+      operationId: checkout
+      security: [{ bearer: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[A-Za-z0-9_-]{8,64}$" }
+      responses:
+        "201":
+          description: Order placed (PENDING_PAYMENT)
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/orders/{id}" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "200":
+          description: A replay of an earlier checkout with the same key
+          headers:
+            Idempotent-Replayed: { schema: { type: string, const: "true" } }
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`cart-empty` or `insufficient-stock`"
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/orders:
+    get:
+      tags: [orders]
+      summary: My orders, newest first
+      operationId: myOrders
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Orders
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/orders/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+    get:
+      tags: [orders]
+      summary: One order (someone else's order is 404, never 403)
+      operationId: getOrder
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/orders/{id}/cancel:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+    post:
+      tags: [orders]
+      summary: Cancel an order (PENDING_PAYMENT or PAID). Restocks; a paid order also requests a refund.
+      operationId: cancelOrder
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: The cancelled order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidTransition" }
+
+  /api/v1/admin/orders:
+    get:
+      tags: [admin]
+      summary: All orders, newest first (ADMIN)
+      operationId: adminOrders
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/OrderStatus" } }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Orders
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/orders/{id}/status:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+    post:
+      tags: [admin]
+      summary: Ship a PAID order or deliver a SHIPPED one (ADMIN)
+      operationId: adminSetOrderStatus
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [SHIPPED, DELIVERED] }
+      responses:
+        "200":
+          description: The updated order
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidTransition" }
+
+  /api/v1/payments/webhook:
+    post:
+      tags: [payments]
+      summary: Payment provider callback (signed, idempotent)
+      description: |
+        The signature is over the exact raw bytes. Each event `id` is processed once: a redelivery answers
+        200 `duplicate`. `payment.succeeded` pays a PENDING_PAYMENT order; for an order that was cancelled
+        meanwhile the money is kept on record and a `refund.requested` event is written. A second, different
+        event for an already settled payment is recorded and `ignored`.
+      operationId: paymentWebhook
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema: { type: string, pattern: "^sha256=[0-9a-f]{64}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, type, paymentId]
+              properties:
+                id: { type: string, pattern: "^[A-Za-z0-9_-]{8,64}$", description: "The provider's event id" }
+                type: { type: string, enum: [payment.succeeded, payment.failed] }
+                paymentId: { type: string }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [eventId, status]
+                properties:
+                  eventId: { type: string }
+                  status: { type: string, enum: [processed, duplicate, ignored] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401":
+          description: Missing or wrong signature (`invalid-signature`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidTransition" }
+
+  /api/v1/admin/outbox:
+    get:
+      tags: [admin]
+      summary: Outbox events, oldest first (ADMIN)
+      operationId: adminOutbox
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: pending, in: query, schema: { type: boolean }, description: "true = not yet published" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/OutboxEvent" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/admin/outbox/publish:
+    post:
+      tags: [admin]
+      summary: Relay pending events to the publisher (ADMIN). At-least-once.
+      operationId: publishOutbox
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: How many events were published
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [published]
+                properties:
+                  published: { type: integer, minimum: 0 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Sku:
+      name: sku
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9-]{2,31}$", description: "Case-insensitive" }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+
+  responses:
+    ValidationError:
+      description: Invalid input (`validation-error`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+          example:
+            type: https://shopflow.example/problems/validation-error
+            title: Validation failed
+            status: 400
+            detail: "quantity must be an integer between 1 and 10"
+    Unauthorized:
+      description: "Missing, invalid or expired access token (`unauthorized`, with header WWW-Authenticate: Bearer)"
+      headers:
+        WWW-Authenticate: { schema: { type: string }, description: "Bearer" }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: Signed in, but not allowed (`forbidden`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: No such resource, or not visible to you (`not-found`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    InvalidTransition:
+      description: The order's status does not allow this, or it changed meanwhile (`invalid-transition`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+          example:
+            type: https://shopflow.example/problems/invalid-transition
+            title: Invalid order transition
+            status: 409
+            detail: "cannot ship an order that is PENDING_PAYMENT"
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 problem details
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri, examples: ["https://shopflow.example/problems/not-found"] }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+
+    Health:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [UP, DOWN] }
+        checks:
+          type: object
+          required: [database]
+          properties:
+            database: { type: string, enum: [UP, DOWN] }
+
+    Role:
+      type: string
+      enum: [CUSTOMER, ADMIN]
+
+    RegisterRequest:
+      type: object
+      required: [email, password, displayName]
+      properties:
+        email: { type: string, format: email, maxLength: 254, description: "Stored lower-case" }
+        password: { type: string, minLength: 8, description: "8 characters to 72 bytes (bcrypt's limit)" }
+        displayName: { type: string, minLength: 1, maxLength: 50 }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string }
+        password: { type: string }
+
+    User:
+      type: object
+      required: [id, email, displayName, role, createdAt]
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        displayName: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        createdAt: { type: string, format: date-time }
+
+    LoginResult:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, const: Bearer }
+        expiresIn: { type: integer, const: 3600, description: "Seconds" }
+        user: { $ref: "#/components/schemas/User" }
+
+    CreateProductRequest:
+      type: object
+      required: [sku, name, category, pricePaise]
+      properties:
+        sku: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9-]{2,31}$", description: "Stored upper-case, unique" }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 2000, default: "" }
+        category: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,29}$", description: "Stored lower-case" }
+        pricePaise: { type: integer, minimum: 1, maximum: 100000000 }
+        stock: { type: integer, minimum: 0, maximum: 1000000, default: 0 }
+        active: { type: boolean, default: true }
+
+    UpdateProductRequest:
+      type: object
+      required: [version]
+      minProperties: 2
+      properties:
+        version: { type: integer, minimum: 1, description: "The version you read" }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 2000 }
+        category: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,29}$" }
+        pricePaise: { type: integer, minimum: 1, maximum: 100000000 }
+        active: { type: boolean }
+
+    Product:
+      type: object
+      required: [id, sku, name, description, category, pricePaise, price, stock, inStock, active, version, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        sku: { type: string }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        pricePaise: { type: integer }
+        price: { type: string, examples: ["₹2,499.00"] }
+        stock: { type: integer }
+        inStock: { type: boolean }
+        active: { type: boolean }
+        version: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ProductItem:
+      type: object
+      description: The list view of a product (no stock count, no description)
+      required: [sku, name, category, pricePaise, price, inStock]
+      properties:
+        sku: { type: string }
+        name: { type: string }
+        category: { type: string }
+        pricePaise: { type: integer }
+        price: { type: string }
+        inStock: { type: boolean }
+
+    DescriptionDraft:
+      type: object
+      required: [sku, provider, fallback, description, generatedAt]
+      properties:
+        sku: { type: string }
+        provider: { type: string, enum: [template, llm] }
+        fallback: { type: boolean, description: "true = the LLM failed and the template answered" }
+        description: { type: string, maxLength: 600 }
+        generatedAt: { type: string, format: date-time }
+
+    SearchFilters:
+      type: object
+      required: [terms, category, minPricePaise, maxPricePaise, inStock]
+      properties:
+        terms: { type: array, maxItems: 5, items: { type: string } }
+        category: { type: [string, "null"] }
+        minPricePaise: { type: [integer, "null"] }
+        maxPricePaise: { type: [integer, "null"] }
+        inStock: { type: [boolean, "null"], description: "true or null (no filter)" }
+
+    SearchAssist:
+      type: object
+      required: [query, provider, fallback, filters, items]
+      properties:
+        query: { type: string }
+        provider: { type: string, enum: [rules, llm] }
+        fallback: { type: boolean }
+        filters: { $ref: "#/components/schemas/SearchFilters" }
+        items: { type: array, maxItems: 20, items: { $ref: "#/components/schemas/ProductItem" } }
+
+    Cart:
+      type: object
+      required: [items, couponCode, couponApplied, subtotalPaise, discountPaise, shippingPaise, totalPaise, total]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [sku, name, unitPricePaise, quantity, lineTotalPaise, available]
+            properties:
+              sku: { type: string }
+              name: { type: string }
+              unitPricePaise: { type: integer, description: "Today's price" }
+              quantity: { type: integer }
+              lineTotalPaise: { type: integer }
+              available: { type: boolean, description: "Active and enough stock right now" }
+        couponCode: { type: [string, "null"] }
+        couponApplied: { type: boolean }
+        subtotalPaise: { type: integer }
+        discountPaise: { type: integer }
+        shippingPaise: { type: integer, description: "₹49, free from ₹999 after the discount" }
+        totalPaise: { type: integer }
+        total: { type: string }
+
+    OrderStatus:
+      type: string
+      enum: [PENDING_PAYMENT, PAID, SHIPPED, DELIVERED, CANCELLED]
+
+    Order:
+      type: object
+      required: [id, userId, status, items, subtotalPaise, discountPaise, shippingPaise, totalPaise, total, couponCode, payment, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        userId: { type: integer }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        items:
+          type: array
+          items:
+            type: object
+            required: [sku, name, unitPricePaise, quantity, lineTotalPaise]
+            properties:
+              sku: { type: string }
+              name: { type: string }
+              unitPricePaise: { type: integer, description: "The price at checkout (snapshotted)" }
+              quantity: { type: integer }
+              lineTotalPaise: { type: integer }
+        subtotalPaise: { type: integer }
+        discountPaise: { type: integer }
+        shippingPaise: { type: integer }
+        totalPaise: { type: integer }
+        total: { type: string }
+        couponCode: { type: [string, "null"] }
+        payment:
+          type: object
+          required: [id, provider, status, amountPaise]
+          properties:
+            id: { type: string, description: "Give this to the payment provider" }
+            provider: { type: string, const: fakepay }
+            status: { type: string, enum: [PENDING, SUCCEEDED, FAILED] }
+            amountPaise: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    OrderList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Order" } }
+
+    OutboxEvent:
+      type: object
+      required: [id, type, orderId, payload, createdAt, publishedAt]
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [order.placed, order.paid, order.cancelled, order.shipped, order.delivered, refund.requested] }
+        orderId: { type: integer }
+        payload:
+          type: object
+          required: [orderId, userId, status, totalPaise]
+          properties:
+            orderId: { type: integer }
+            userId: { type: integer }
+            status: { $ref: "#/components/schemas/OrderStatus" }
+            totalPaise: { type: integer }
+        createdAt: { type: string, format: date-time }
+        publishedAt: { type: [string, "null"], format: date-time }

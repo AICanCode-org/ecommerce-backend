@@ -1,0 +1,37 @@
+# ShopFlow local stack (starter): PostgreSQL for running a track on your machine.
+#   docker compose up -d postgres      then   cd tracks/<track> && make run
+# In Phase 6 you add the app itself as a service (one profile per track).
+name: shopflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shopflow
+      POSTGRES_PASSWORD: shopflow   # local development only - never reuse in a deployment
+      POSTGRES_DB: shopflow
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./spec/db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopflow -d shopflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Optional local LLM (Phase 3 M3):  docker compose --profile ollama up -d
+  # then: docker compose exec ollama ollama pull llama3.2:1b  and run your track with
+  #       AI_PROVIDER=llm LLM_BASE_URL=http://localhost:11434/v1
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+
+volumes:
+  pgdata:
+  ollama:
