@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-02
+### Added
+- Request IDs: `X-Request-ID` is validated (or generated), echoed on every response and included in every log line.
+- Structured JSON logs (Logstash JSON in Java, a JSON formatter in Python, pino in TypeScript), one access line per request.
+- `GET /metrics` (Prometheus text): users registered, failed logins, orders placed, checkout replays,
+  duplicate webhooks, orders expired, AI fallbacks, LLM short-circuits. Same names in every track.
+- LLM circuit breaker shared by description drafts and search assist: 3 failures in a row open it for
+  30 s, then one half-open trial. A hanging LLM now costs three slow requests instead of every request.
+- Payment window: every order gets `expiresAt` (15 minutes, migration `V2__order_payment_window.sql`,
+  expand-only so v1.0.0 keeps working against the new schema) and `POST /api/v1/admin/orders/expire`
+  cancels unpaid orders whose window closed and puts their stock back. OpenAPI 1.1.0.
+- `scripts/game-day.sh` (fake LLM that hangs) and `docs/postmortem-2026-10-02-llm-hang.md`.
+- Smoke test: request-ID, `/metrics` and payment-window checks (81 checks).
+
 ## [1.0.0] - 2026-10-02
 ### Added
 - Requirements (FR-1..18, NFR-1..8, threats T1..T11, user stories with Given/When/Then), architecture

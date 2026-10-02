@@ -229,6 +229,29 @@ else
   expect 404 "an inactive product is 404 for shoppers"
 fi
 
+# ---- v1.1 observability + payment window (Phase 7) ----
+HEADERS="$(curl -s -o /dev/null -D - -H 'X-Request-ID: smoke-req-1' "$BASE_URL/health" | tr -d '\r')"
+[ "$(header X-Request-ID)" = "smoke-req-1" ] && ok "X-Request-ID is echoed (v1.1)" || bad "X-Request-ID is echoed (v1.1)"
+HEADERS="$(curl -s -o /dev/null -D - -H 'X-Request-ID: bad id with spaces' "$BASE_URL/health" | tr -d '\r')"
+RID="$(header X-Request-ID)"
+[ -n "$RID" ] && [ "$RID" != "bad id with spaces" ] && ok "an unsafe X-Request-ID is replaced (v1.1)" || bad "an unsafe X-Request-ID is replaced (v1.1)"
+request GET /metrics
+expect 200 "GET /metrics (v1.1)"
+REGISTERED="$(sed -n 's/^shopflow_users_registered_total \([0-9][0-9]*\)$/\1/p' "$TMP")"
+[ "${REGISTERED:-0}" -ge 1 ] 2>/dev/null && ok "shopflow_users_registered_total=$REGISTERED" || bad "shopflow_users_registered_total >= 1"
+if [ -n "${ADMIN:-}" ] && [ -n "${SECOND_ID:-}" ]; then
+  request GET "/api/v1/orders/$SECOND_ID" "" "$ALICE"
+  [ -n "$(json_str expiresAt)" ] && ok "orders carry expiresAt (v1.1)" || bad "orders carry expiresAt (v1.1)"
+  request POST /api/v1/admin/orders/expire "" "$ALICE"
+  expect 403 "a CUSTOMER cannot run the expiry job (v1.1)"
+  request POST /api/v1/admin/orders/expire "" "$ADMIN"
+  expect 200 "ADMIN runs the expiry job (v1.1)"
+  [ -n "$(json_num expired)" ] && ok "expired $(json_num expired) overdue order(s)" || bad "the expiry job answers {expired: n}"
+else
+  skip "payment window checks (no admin session)"
+fi
+# ---- end v1.1 ----
+
 echo
 echo "Result: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

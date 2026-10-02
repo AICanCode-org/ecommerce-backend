@@ -128,3 +128,23 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   lists only `ci.yml`.
 * **Time saved / lost (honest guess):** neutral.
 * **What I learned:** consistency across sibling projects is a feature for learners, not just for maintainers.
+
+### 2026-10-02 · Phase 7 · A reassuring number that measured the wrong thing
+* **Tool / model:** AI coding agent (shell)
+* **Prompt (summary):**
+  > Write a game-day script: a fake OpenAI-compatible LLM that either answers or hangs, point the app at it, and measure search-assist latency before, during and after the fault. Also time `/health` and a cart read while 50 assists are in flight.
+* **What it produced:** `scripts/game-day.sh` with a small Python fake LLM (`MODE=ok` / `MODE=hang`) started
+  on the Compose network, four phases and a `/metrics` report. Its first summary of the Python v1.0.0 run
+  said "`/health` was slow (4.0 s) but checkout stayed fast (`GET /cart` 10 ms)".
+* **What I kept / changed / rejected and why:** kept the script and the numbers, rejected the conclusion.
+  The script times `/cart` *after* `/health` returns, by which point the first assists had timed out and
+  freed their threads, and `/cart` is a plain `def` endpoint in the same thread pool as `/health`. The
+  post-mortem now says that a checkout at that moment would have waited the same way, and re-measuring
+  with a checkout in flight is an action item. Learned from a sibling project, every tag ran from its own
+  clean copy in its own Compose project (`gdwv10`, `gdwv11`), one after the other, so a rebuilt
+  `:local` image could not mix versions.
+* **How I verified it:** read the FastAPI/AnyIO docs on running `def` endpoints in a worker thread pool
+  (40 threads by default) and the script's order of operations; v1.0.0 prints "no /metrics before v1.1"
+  and every hung assist waits ≈ 5 s; v1.1.0 shows 3 slow assists then 7 short-circuits in all three tracks.
+* **Time saved / lost (honest guess):** saved ~1 h of writing; the review took 10 minutes and changed the post-mortem.
+* **What I learned:** a fast number measured at the wrong moment is worse than no number. Check *when* you measured, not just *what*.
