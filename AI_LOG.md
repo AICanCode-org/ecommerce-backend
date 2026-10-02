@@ -49,3 +49,18 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   each track (only the always-on tests pass, the rest are skipped as pending).
 * **Time saved / lost (honest guess):** saved ~10 min.
 * **What I learned:** make ports configurable from day one; it costs one line in Compose.
+
+### 2026-10-02 · Phase 1 · A header name that existed only in the requirements
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Draft the checkout and webhook requirements (FR-11..FR-13) with Given/When/Then acceptance criteria.
+* **What it produced:** clear, testable stories, but the replay header in the draft did not match the
+  name used by the contract and the tests (`Idempotent-Replayed`), and the version-conflict criterion did
+  not say what the client needs to recover (the current version).
+* **What I kept / changed / rejected and why:** kept the structure, corrected the header name to the one
+  in `spec/openapi.yaml`, and made the `409 version-conflict` criterion state that the response detail
+  names the current version.
+* **How I verified it:** `grep` for every header, problem type and status code in the requirements
+  against `spec/openapi.yaml`; each acceptance criterion maps to a test name.
+* **Time saved / lost (honest guess):** saved ~1 h of writing; the cross-check took 15 minutes.
+* **What I learned:** requirements and contract drift apart within one draft. Check names, not just ideas.
