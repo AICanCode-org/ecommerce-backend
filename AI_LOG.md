@@ -28,3 +28,24 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
 ## My entries
 
 <!-- Start below this line. Phase 0 asks you to write your first entry. -->
+
+> The reference solution was written by the AiCanCode maintainers working with an AI coding agent.
+> These entries record checks that really happened while building it. Your entries will be about *your* work.
+
+### 2026-10-02 · Phase 0 · Port 5432 was already taken
+* **Tool / model:** AI coding agent (chat + shell)
+* **Prompt (summary):**
+  > `docker compose up -d postgres` fails with "Bind for 0.0.0.0:5432 failed: port is already allocated". What is going on and what is the least invasive fix?
+* **What it produced:** the explanation that another PostgreSQL (here: a different project's Compose
+  stack on the same machine) already published 5432, and three options: stop the other stack, change the
+  published port with `POSTGRES_PORT` (already supported by our `docker-compose.yml`), or stop a system
+  PostgreSQL.
+* **What I kept / changed / rejected and why:** kept the `POSTGRES_PORT` override (plus a separate
+  Compose project name) and pointed `DATABASE_URL` / `TEST_DATABASE_URL` at the new port, because
+  stopping someone else's stack is not my call. Rejected the suggestion to `kill` whatever process owned the port.
+* **How I verified it:** `docker compose ps` → `healthy`; `psql … -c '\l'` lists both `shopflow` and
+  `shopflow_test` (created by `spec/db/init/01-create-test-db.sql`); each starter boots and
+  `curl localhost:<port>/health` → `{"status":"UP","checks":{"database":"UP"}}`; `make lint test` in
+  each track (only the always-on tests pass, the rest are skipped as pending).
+* **Time saved / lost (honest guess):** saved ~10 min.
+* **What I learned:** make ports configurable from day one; it costs one line in Compose.
