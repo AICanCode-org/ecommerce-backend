@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Protocol
 
 from . import validation as v
@@ -34,6 +35,7 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     ("PENDING_PAYMENT", "pay"): "PAID",
     ("PENDING_PAYMENT", "fail"): "CANCELLED",
     ("PENDING_PAYMENT", "cancel"): "CANCELLED",
+    ("PENDING_PAYMENT", "expire"): "CANCELLED",  # v1.1: the payment window closed
     ("PAID", "cancel"): "CANCELLED",
     ("PAID", "ship"): "SHIPPED",
     ("SHIPPED", "deliver"): "DELIVERED",
@@ -43,6 +45,8 @@ EVENT_FOR_STATUS = {"PAID": "order.paid", "CANCELLED": "order.cancelled", "SHIPP
                     "DELIVERED": "order.delivered"}  # fmt: skip
 WEBHOOK_TYPES = ("payment.succeeded", "payment.failed")
 OUTBOX_BATCH = 100
+RESERVATION_TTL = timedelta(minutes=15)  # v1.1: how long an unpaid order holds its stock
+EXPIRE_BATCH = 100
 
 
 def next_status(current: str, action: str) -> str:
@@ -92,6 +96,7 @@ class OrderService:
                 raise insufficient_stock(f"{line.product.sku} is no longer available")
         coupon = self._carts.find_coupon(state.coupon_code) if state.coupon_code else None
         pricing = price_cart([(line.product.price_paise, line.quantity) for line in state.lines], coupon)
+        now = self._clock()
         draft = OrderDraft(
             user_id=principal.user_id,
             idempotency_key=key,
@@ -102,7 +107,8 @@ class OrderService:
             pricing=pricing,
             coupon_code=state.coupon_code if pricing.coupon_applied else None,
             payment_id=self._new_payment_id(),
-            at=self._clock(),
+            at=now,
+            expires_at=now + RESERVATION_TTL,
         )
         try:
             return self.orders.place_order(draft), False
@@ -135,6 +141,22 @@ class OrderService:
         require_role(principal, "ADMIN")
         target = v.order_status_target(v.require_object(payload).get("status"))
         return self._apply(self.get(principal, order_id), ACTION_FOR_TARGET[target])
+
+    def expire_overdue(self, principal: Principal) -> int:
+        """v1.1: cancel unpaid orders whose payment window closed and put their stock back.
+
+        Safe to run any time and from several places at once: each order goes through the same
+        compare-and-set transition, so an order paid a millisecond ago is simply skipped.
+        """
+        require_role(principal, "ADMIN")
+        now = self._clock()
+        expired = 0
+        for order in self.orders.expired_orders(now, EXPIRE_BATCH):
+            if self.orders.apply_transition(transition_for(order, "expire", now)) == "ok":
+                expired += 1
+        if expired:
+            log.info("expired %d unpaid order(s)", expired)
+        return expired
 
     def _apply(self, order: Order, action: str) -> Order:
         result = self.orders.apply_transition(transition_for(order, action, self._clock()))

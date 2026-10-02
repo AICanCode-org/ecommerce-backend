@@ -245,6 +245,23 @@ def test_cancel_restocks_and_outbox_relay_marks_published(client):
                        "totalPaise": order["totalPaise"]}  # fmt: skip
 
 
+def test_v2_payment_window_expiry_in_the_database(client):
+    """v1.1: V2 adds orders.expires_at; the expiry job cancels overdue unpaid orders and restocks them."""
+    asha = customer(client, "asha@shopflow.test")
+    product(client, "EXP-1", stock=2)
+    client.put("/api/v1/cart/items/EXP-1", json={"quantity": 2}, headers=h(asha))
+    order = checkout(client, asha, "expiry-int-0001").json()
+    assert order["expiresAt"] is not None
+    assert sql("SELECT version FROM schema_migrations ORDER BY version") == [(1,), (2,)]
+    url = "/api/v1/admin/orders/expire"
+    assert client.post(url, headers=h(admin(client))).json() == {"expired": 0}
+    sql("UPDATE orders SET expires_at = now() - interval '1 second' WHERE id = %s", (order["id"],))
+    assert client.post(url, headers=h(admin(client))).json() == {"expired": 1}
+    assert sql("SELECT status FROM orders WHERE id = %s", (order["id"],)) == [("CANCELLED",)]
+    assert sql("SELECT stock FROM products WHERE sku = 'EXP-1'") == [(2,)]
+    assert client.post(url, headers=h(admin(client))).json() == {"expired": 0}
+
+
 def test_admin_is_bootstrapped_from_the_environment(client):
     assert sql("SELECT role FROM users WHERE email = %s", (ADMIN["email"],)) == [("ADMIN",)]
 

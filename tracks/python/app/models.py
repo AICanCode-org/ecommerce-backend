@@ -141,6 +141,7 @@ class Order:
     payment: Payment
     created_at: datetime
     updated_at: datetime
+    expires_at: datetime | None = None  # v1.1: end of the payment window
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,7 @@ class OrderDraft:
     coupon_code: str | None
     payment_id: str
     at: datetime
+    expires_at: datetime | None = None  # v1.1: at + RESERVATION_TTL
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -80,6 +83,68 @@ class LlmClient:
 
 class Chat(Protocol):
     def chat(self, system: str, user: str, max_tokens: int) -> str: ...
+
+
+class CircuitOpenError(RuntimeError):
+    pass
+
+
+class CircuitBreaker:
+    """v1.1 (after the game day): stop calling an LLM that keeps failing.
+
+    CLOSED: calls go through; ``threshold`` failures in a row open the circuit.
+    OPEN: calls fail immediately (no timeout per search) for ``cooldown_s`` seconds.
+    HALF-OPEN: after the cooldown one trial call goes through; success closes, failure re-opens.
+    """
+
+    def __init__(
+        self,
+        client: Chat,
+        threshold: int = 3,
+        cooldown_s: float = 30.0,
+        now: Callable[[], float] = time.monotonic,
+        on_short_circuit: Callable[[], None] = lambda: None,
+    ):
+        self._client = client
+        self._threshold = threshold
+        self._cooldown_s = cooldown_s
+        self._now = now
+        self._on_short_circuit = on_short_circuit
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._opened_at: float | None = None
+        self._trial_running = False
+
+    @property
+    def state(self) -> str:
+        if self._opened_at is None:
+            return "closed"
+        return "half-open" if self._now() - self._opened_at >= self._cooldown_s else "open"
+
+    def chat(self, system: str, user: str, max_tokens: int) -> str:
+        with self._lock:
+            state = self.state
+            if state == "open" or (state == "half-open" and self._trial_running):
+                self._on_short_circuit()
+                raise CircuitOpenError("LLM circuit open: skipping the call")
+            self._trial_running = state == "half-open"
+        try:
+            answer = self._client.chat(system, user, max_tokens)
+        except Exception:
+            with self._lock:
+                self._trial_running = False
+                self._failures += 1
+                if self._opened_at is not None or self._failures >= self._threshold:
+                    self._opened_at = self._now()
+                    log.warning("LLM circuit opened after %d failure(s)", self._failures)
+            raise
+        with self._lock:
+            if self._opened_at is not None:
+                log.info("LLM circuit closed again")
+            self._trial_running = False
+            self._failures = 0
+            self._opened_at = None
+        return answer
 
 
 # ---- product description drafts -----------------------------------------------------------------

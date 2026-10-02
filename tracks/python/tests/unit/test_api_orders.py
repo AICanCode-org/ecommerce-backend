@@ -22,6 +22,7 @@ def test_checkout_201_then_replay_200(api, client):
         "payment": {"id": "pay_test_1", "provider": "fakepay", "status": "PENDING", "amountPaise": 49_900},
         "createdAt": "2026-10-02T09:30:00.000Z",
         "updatedAt": "2026-10-02T09:30:00.000Z",
+        "expiresAt": "2026-10-02T09:45:00.000Z",
     }
     again = api.checkout(session)
     assert again.status_code == 200 and again.headers["idempotent-replayed"] == "true"

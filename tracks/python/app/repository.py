@@ -79,6 +79,7 @@ class OrderRepository(Protocol):
     def find_order(self, order_id: int) -> Order | None: ...
     def orders_for_user(self, user_id: int, limit: int) -> list[Order]: ...
     def orders_by_status(self, status: str | None, limit: int) -> list[Order]: ...
+    def expired_orders(self, now: datetime, limit: int) -> list[Order]: ...  # v1.1
     def find_payment(self, payment_id: str) -> Payment | None: ...
     def has_payment_event(self, event_id: str) -> bool: ...
     def apply_transition(self, t: Transition) -> str: ...  # "ok" | "duplicate" | "conflict"
@@ -101,7 +102,7 @@ _USER_COLS = "id, email, password_hash, display_name, role, created_at"
 _PRODUCT_COLS = "id, sku, name, description, category, price_paise, stock, active, version, created_at, updated_at"
 _ORDER_SELECT = """
 SELECT o.id, o.user_id, o.status, o.subtotal_paise, o.discount_paise, o.shipping_paise, o.total_paise,
-       o.coupon_code, o.idempotency_key, o.created_at, o.updated_at,
+       o.coupon_code, o.idempotency_key, o.created_at, o.updated_at, o.expires_at,
        p.id AS payment_id, p.provider, p.status AS payment_status, p.amount_paise,
        p.created_at AS payment_created_at, p.updated_at AS payment_updated_at,
        COALESCE((SELECT json_agg(json_build_object('product_id', i.product_id, 'sku', i.sku, 'name', i.name,
@@ -122,7 +123,7 @@ def _order(row: dict) -> Order:
         subtotal_paise=row["subtotal_paise"], discount_paise=row["discount_paise"],
         shipping_paise=row["shipping_paise"], total_paise=row["total_paise"], coupon_code=row["coupon_code"],
         idempotency_key=row["idempotency_key"], payment=payment, created_at=row["created_at"],
-        updated_at=row["updated_at"],
+        updated_at=row["updated_at"], expires_at=row["expires_at"],
     )  # fmt: skip
 
 
@@ -310,10 +311,10 @@ class PostgresOrderRepository(_Pg):
                 p = d.pricing
                 cur.execute(
                     "INSERT INTO orders (user_id, status, subtotal_paise, discount_paise, shipping_paise, total_paise, "
-                    "coupon_code, idempotency_key, created_at, updated_at) "
-                    "VALUES (%s, 'PENDING_PAYMENT', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    "coupon_code, idempotency_key, created_at, updated_at, expires_at) "
+                    "VALUES (%s, 'PENDING_PAYMENT', %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                     (d.user_id, p.subtotal_paise, p.discount_paise, p.shipping_paise, p.total_paise,
-                     d.coupon_code, d.idempotency_key, d.at, d.at),
+                     d.coupon_code, d.idempotency_key, d.at, d.at, d.expires_at or d.at),
                 )  # fmt: skip
                 order_id = cur.fetchone()["id"]  # type: ignore[index]
                 for n, line in enumerate(d.lines, start=1):
@@ -353,6 +354,13 @@ class PostgresOrderRepository(_Pg):
         if status is None:
             return [_order(r) for r in self._all(_ORDER_SELECT + "ORDER BY o.id DESC LIMIT %s", (limit,))]
         rows = self._all(_ORDER_SELECT + "WHERE o.status = %s ORDER BY o.id DESC LIMIT %s", (status, limit))
+        return [_order(r) for r in rows]
+
+    def expired_orders(self, now, limit) -> list[Order]:
+        rows = self._all(
+            _ORDER_SELECT + "WHERE o.status = 'PENDING_PAYMENT' AND o.expires_at <= %s ORDER BY o.id LIMIT %s",
+            (now, limit),
+        )
         return [_order(r) for r in rows]
 
     def find_payment(self, payment_id) -> Payment | None:
@@ -585,6 +593,7 @@ class InMemoryStore:
             order = Order(
                 order_id, d.user_id, "PENDING_PAYMENT", list(d.lines), p.subtotal_paise, p.discount_paise,
                 p.shipping_paise, p.total_paise, d.coupon_code, d.idempotency_key, payment, d.at, d.at,
+                d.expires_at or d.at,
             )  # fmt: skip
             self.payments[payment.id] = payment
             self.orders[order_id] = order
@@ -607,6 +616,10 @@ class InMemoryStore:
     def orders_by_status(self, status, limit) -> list[Order]:
         found = [o for o in self.orders.values() if status is None or o.status == status]
         return [self._copy(o) for o in sorted(found, key=lambda o: -o.id)[:limit]]
+
+    def expired_orders(self, now, limit) -> list[Order]:
+        found = [o for o in self.orders.values() if o.status == "PENDING_PAYMENT" and o.expires_at <= now]
+        return [self._copy(o) for o in sorted(found, key=lambda o: o.id)[:limit]]
 
     def find_payment(self, payment_id) -> Payment | None:
         found = self.payments.get(payment_id)
