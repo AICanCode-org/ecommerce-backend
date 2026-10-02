@@ -33,6 +33,7 @@ describe("order endpoints", () => {
       payment: { id: "pay_test_1", provider: "fakepay", status: "PENDING", amountPaise: 49_900 },
       createdAt: "2026-10-02T09:30:00.000Z",
       updatedAt: "2026-10-02T09:30:00.000Z",
+      expiresAt: "2026-10-02T09:45:00.000Z",
     });
     const again = await api.checkout(session);
     expect(again.statusCode).toBe(200);

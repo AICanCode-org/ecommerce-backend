@@ -5,11 +5,12 @@ import { buildApp } from "../src/app.js";
 import type { Clock } from "../src/clock.js";
 import { loadSettings, type Settings } from "../src/config.js";
 import { ApiError } from "../src/errors.js";
+import type { Metrics } from "../src/metrics.js";
 import type { Principal, Role } from "../src/models.js";
 import { LogPublisher } from "../src/orders.js";
 import { InMemoryStore } from "../src/repository.js";
 import { signWebhook } from "../src/security.js";
-import { wire } from "../src/wiring.js";
+import { wire, type Ai } from "../src/wiring.js";
 
 export const TEST_SECRET = "test-secret-that-is-at-least-32-bytes-long";
 export const WEBHOOK_SECRET = "test-webhook-secret-at-least-32-bytes";
@@ -98,13 +99,19 @@ export class Api {
     readonly clock: FakeClock,
   ) {}
 
-  static async create(): Promise<Api> {
+  static async create(opts: { settings?: Partial<Settings>; ai?: Ai; metrics?: Metrics } = {}): Promise<Api> {
     const store = new InMemoryStore();
     const clock = new FakeClock();
-    const settings = testSettings({ adminEmail: "admin@shopflow.test", adminPassword: "admin-password" });
+    const settings = testSettings({
+      adminEmail: "admin@shopflow.test",
+      adminPassword: "admin-password",
+      ...opts.settings,
+    });
+    const ai = opts.ai ?? (settings.aiProvider === "llm" ? undefined : offlineAi());
     const deps = await wire(settings, repos(store), {
       clock: clock.fn,
-      ai: offlineAi(),
+      ai,
+      metrics: opts.metrics,
       warn: () => {},
       paymentIds: paymentIds(),
       publisher: new LogPublisher(() => {}),

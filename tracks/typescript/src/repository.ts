@@ -72,6 +72,8 @@ export interface OrderRepository {
   findOrder(id: number): Promise<Order | null>;
   ordersForUser(userId: number, limit: number): Promise<Order[]>;
   ordersByStatus(status: OrderStatus | null, limit: number): Promise<Order[]>;
+  /** v1.1: unpaid orders whose payment window closed at or before `now`, oldest first. */
+  expiredOrders(now: Date, limit: number): Promise<Order[]>;
   findPayment(paymentId: string): Promise<Payment | null>;
   hasPaymentEvent(eventId: string): Promise<boolean>;
   applyTransition(t: Transition): Promise<TransitionResult>;
@@ -100,7 +102,7 @@ const PRODUCT_COLS =
   "id, sku, name, description, category, price_paise, stock, active, version, created_at, updated_at";
 const ORDER_SELECT = `
 SELECT o.id, o.user_id, o.status, o.subtotal_paise, o.discount_paise, o.shipping_paise, o.total_paise,
-       o.coupon_code, o.idempotency_key, o.created_at, o.updated_at,
+       o.coupon_code, o.idempotency_key, o.created_at, o.updated_at, o.expires_at,
        p.id AS payment_id, p.provider, p.status AS payment_status, p.amount_paise,
        p.created_at AS payment_created_at, p.updated_at AS payment_updated_at,
        COALESCE((SELECT json_agg(json_build_object('product_id', i.product_id, 'sku', i.sku, 'name', i.name,
@@ -168,6 +170,7 @@ const toOrder = (r: Row): Order => ({
   },
   createdAt: r.created_at as Date,
   updatedAt: r.updated_at as Date,
+  expiresAt: r.expires_at as Date,
 });
 const toEvent = (r: Row): OutboxEvent => ({
   id: num(r.id),
@@ -403,8 +406,8 @@ export class PgOrderRepository extends Pg implements OrderRepository {
         const p = d.pricing;
         const { rows } = await db.query(
           `INSERT INTO orders (user_id, status, subtotal_paise, discount_paise, shipping_paise, total_paise,
-             coupon_code, idempotency_key, created_at, updated_at)
-           VALUES ($1, 'PENDING_PAYMENT', $2, $3, $4, $5, $6, $7, $8, $8) RETURNING id`,
+             coupon_code, idempotency_key, created_at, updated_at, expires_at)
+           VALUES ($1, 'PENDING_PAYMENT', $2, $3, $4, $5, $6, $7, $8, $8, $9) RETURNING id`,
           [
             d.userId,
             p.subtotalPaise,
@@ -414,6 +417,7 @@ export class PgOrderRepository extends Pg implements OrderRepository {
             d.couponCode,
             d.idempotencyKey,
             d.at,
+            d.expiresAt,
           ],
         );
         const orderId = num(rows[0].id);
@@ -463,6 +467,14 @@ export class PgOrderRepository extends Pg implements OrderRepository {
       status === null
         ? await this.all(`${ORDER_SELECT} ORDER BY o.id DESC LIMIT $1`, [limit])
         : await this.all(`${ORDER_SELECT} WHERE o.status = $1 ORDER BY o.id DESC LIMIT $2`, [status, limit]);
+    return rows.map(toOrder);
+  }
+
+  async expiredOrders(now: Date, limit: number) {
+    const rows = await this.all(
+      `${ORDER_SELECT} WHERE o.status = 'PENDING_PAYMENT' AND o.expires_at <= $1 ORDER BY o.id LIMIT $2`,
+      [now, limit],
+    );
     return rows.map(toOrder);
   }
 
@@ -731,6 +743,7 @@ export class InMemoryStore implements UserRepository, ProductRepository, CartRep
       payment,
       createdAt: d.at,
       updatedAt: d.at,
+      expiresAt: d.expiresAt,
     };
     this.payments.set(payment.id, payment);
     this.orders.set(id, order);
@@ -768,6 +781,14 @@ export class InMemoryStore implements UserRepository, ProductRepository, CartRep
     return [...this.orders.values()]
       .filter((o) => status === null || o.status === status)
       .sort((a, b) => b.id - a.id)
+      .slice(0, limit)
+      .map((o) => this.copyOrder(o));
+  }
+
+  async expiredOrders(now: Date, limit: number) {
+    return [...this.orders.values()]
+      .filter((o) => o.status === "PENDING_PAYMENT" && o.expiresAt.getTime() <= now.getTime())
+      .sort((a, b) => a.id - b.id)
       .slice(0, limit)
       .map((o) => this.copyOrder(o));
   }

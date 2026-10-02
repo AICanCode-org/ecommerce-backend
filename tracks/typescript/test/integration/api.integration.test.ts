@@ -288,6 +288,26 @@ describe("API against PostgreSQL", () => {
     });
   });
 
+  it("v1.1: V2 adds the payment window and the expiry job cancels overdue orders", async () => {
+    const asha = await customer("asha@shopflow.test");
+    await product("EXP-1", { stock: 2 });
+    await add(asha, "EXP-1", 2);
+    const order = (await checkout(asha, "expiry-int-0001")).json();
+    expect(order.expiresAt).not.toBeNull();
+    expect(
+      (await sql("SELECT version FROM schema_migrations ORDER BY version")).map((r) => r.version),
+    ).toEqual([1, 2]);
+    const url = "/api/v1/admin/orders/expire";
+    expect((await req("POST", url, undefined, await admin())).json()).toEqual({ expired: 0 });
+    await sql("UPDATE orders SET expires_at = now() - interval '1 second' WHERE id = $1", [order.id]);
+    expect((await req("POST", url, undefined, await admin())).json()).toEqual({ expired: 1 });
+    expect(await sql("SELECT status FROM orders WHERE id = $1", [order.id])).toEqual([
+      { status: "CANCELLED" },
+    ]);
+    expect(await sql("SELECT stock FROM products WHERE sku = 'EXP-1'")).toEqual([{ stock: 2 }]);
+    expect((await req("POST", url, undefined, await admin())).json()).toEqual({ expired: 0 });
+  });
+
   it("bootstraps the admin from the environment", async () => {
     expect(await sql("SELECT role FROM users WHERE email = $1", [ADMIN.email])).toEqual([{ role: "ADMIN" }]);
   });

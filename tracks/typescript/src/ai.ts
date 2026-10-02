@@ -72,6 +72,69 @@ export class LlmClient implements Chat {
   }
 }
 
+export class CircuitOpenError extends Error {}
+
+/**
+ * v1.1 (after the game day): stop calling an LLM that keeps failing.
+ * CLOSED: calls go through; `threshold` failures in a row open the circuit.
+ * OPEN: calls fail immediately (no timeout per search) for `cooldownMs`.
+ * HALF-OPEN: after the cooldown one trial call goes through; success closes, failure re-opens.
+ */
+export class CircuitBreaker implements Chat {
+  private failures = 0;
+  private openedAt: number | null = null;
+  private trialRunning = false;
+
+  constructor(
+    private readonly client: Chat,
+    private readonly opts: {
+      threshold?: number;
+      cooldownMs?: number;
+      now?: () => number;
+      onShortCircuit?: () => void;
+      warn?: (msg: string) => void;
+    } = {},
+  ) {}
+
+  private get threshold() {
+    return this.opts.threshold ?? 3;
+  }
+
+  private now() {
+    return (this.opts.now ?? Date.now)();
+  }
+
+  get state(): "closed" | "open" | "half-open" {
+    if (this.openedAt === null) return "closed";
+    return this.now() - this.openedAt >= (this.opts.cooldownMs ?? 30_000) ? "half-open" : "open";
+  }
+
+  async chat(system: string, user: string, maxTokens: number): Promise<string> {
+    const state = this.state;
+    if (state === "open" || (state === "half-open" && this.trialRunning)) {
+      this.opts.onShortCircuit?.();
+      throw new CircuitOpenError("LLM circuit open: skipping the call");
+    }
+    this.trialRunning = state === "half-open";
+    let answer: string;
+    try {
+      answer = await this.client.chat(system, user, maxTokens);
+    } catch (err) {
+      this.trialRunning = false;
+      this.failures += 1;
+      if (this.openedAt !== null || this.failures >= this.threshold) {
+        this.openedAt = this.now();
+        (this.opts.warn ?? console.warn)(`LLM circuit opened after ${this.failures} failure(s)`);
+      }
+      throw err;
+    }
+    this.trialRunning = false;
+    this.failures = 0;
+    this.openedAt = null;
+    return answer;
+  }
+}
+
 // ---- product description drafts -----------------------------------------------------------------
 export interface Writer {
   write(product: Product, keywords: string[]): Promise<string>;

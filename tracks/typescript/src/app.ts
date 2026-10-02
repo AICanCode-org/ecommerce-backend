@@ -1,5 +1,6 @@
 // HTTP layer (Fastify). Thin: read the request, call a service, shape the JSON, map errors.
 import Fastify, {
+  LogController,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
@@ -11,8 +12,10 @@ import type { CartService } from "./cart.js";
 import type { CatalogService } from "./catalog.js";
 import { iso, type Clock } from "./clock.js";
 import { ApiError, notFound, validationError } from "./errors.js";
+import type { Metrics } from "./metrics.js";
 import type { CartView, LoginResult, Order, OutboxEvent, Product, SearchFilters, User } from "./models.js";
 import { formatInr } from "./money.js";
+import { incomingOrNewId, REQUEST_ID_HEADER } from "./observability.js";
 import type { OrderService, OutboxService, PaymentService } from "./orders.js";
 import { ACCESS_TOKEN_TTL_SECONDS } from "./security.js";
 import * as v from "./validation.js";
@@ -30,6 +33,7 @@ export interface AppDeps {
   descriptions: DescriptionService;
   assist: SearchAssistService;
   clock: Clock;
+  metrics: Metrics;
 }
 
 // ---- JSON shapes (identical in every track, see spec/openapi.yaml) ------------------------------
@@ -116,6 +120,7 @@ export const orderJson = (o: Order) => ({
   },
   createdAt: iso(o.createdAt),
   updatedAt: iso(o.updatedAt),
+  expiresAt: iso(o.expiresAt),
 });
 
 export const eventJson = (e: OutboxEvent) => ({
@@ -153,8 +158,17 @@ function sendProblem(reply: FastifyReply, err: ApiError) {
 }
 
 export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): FastifyInstance {
-  const app = Fastify(opts);
-  const { auth, catalog, cart, orders, payments, outbox, descriptions, assist, clock } = deps;
+  const app = Fastify({
+    // Request IDs (v1.1): one ID per request, echoed back and attached to every log line.
+    requestIdHeader: false,
+    genReqId: (req) => incomingOrNewId(req.headers[REQUEST_ID_HEADER]),
+    logController: new LogController({ requestIdLogLabel: "requestId" }),
+    ...opts,
+  });
+  app.addHook("onSend", async (request, reply) => {
+    reply.header(REQUEST_ID_HEADER, request.id);
+  });
+  const { auth, catalog, cart, orders, payments, outbox, descriptions, assist, clock, metrics } = deps;
   const principal = (req: FastifyRequest) => auth.authenticate(req.headers.authorization);
 
   // ---- error mapping ---------------------------------------------------
@@ -177,12 +191,22 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
       .code(dbUp ? 200 : 503)
       .send({ status: dbUp ? "UP" : "DOWN", checks: { database: dbUp ? "UP" : "DOWN" } });
   });
+  app.get("/metrics", async (_req, reply) => reply.type("text/plain; version=0.0.4").send(metrics.render()));
 
   // ---- accounts ------------------------------------------------------------
-  app.post("/api/v1/auth/register", async (req, reply) =>
-    reply.code(201).send(userJson(await auth.register(req.body))),
-  );
-  app.post("/api/v1/auth/login", async (req) => loginJson(await auth.login(req.body)));
+  app.post("/api/v1/auth/register", async (req, reply) => {
+    const user = await auth.register(req.body);
+    metrics.inc("shopflow_users_registered_total");
+    return reply.code(201).send(userJson(user));
+  });
+  app.post("/api/v1/auth/login", async (req) => {
+    try {
+      return loginJson(await auth.login(req.body));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) metrics.inc("shopflow_logins_failed_total");
+      throw err;
+    }
+  });
   app.get("/api/v1/me", async (req) => userJson(await auth.me(await principal(req))));
 
   // ---- catalog -------------------------------------------------------------
@@ -223,6 +247,7 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     const words = body === undefined || body === null ? [] : v.keywords(v.requireObject(body).keywords);
     const product = await catalog.get(who, (req.params as Params).sku!);
     const result = await descriptions.draft(product, words);
+    if (result.fallback) metrics.inc("shopflow_ai_fallback_total");
     return {
       sku: product.sku,
       provider: result.provider,
@@ -235,6 +260,7 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     const query = v.assistQuery(queryParam(req, "q"));
     const known = (await catalog.categories()).map((c) => c.name);
     const result = await assist.interpret(query, known);
+    if (result.fallback) metrics.inc("shopflow_ai_fallback_total");
     const f = result.filters;
     const page = await catalog.search({
       limit: ASSIST_RESULTS,
@@ -272,6 +298,7 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     const { order, replayed } = await orders.checkout(who, header(req, "idempotency-key"));
     reply.header("location", `/api/v1/orders/${order.id}`);
     if (replayed) reply.header("idempotent-replayed", "true");
+    metrics.inc(replayed ? "shopflow_checkout_replays_total" : "shopflow_orders_placed_total");
     return reply.code(replayed ? 200 : 201).send(orderJson(order));
   });
   app.get("/api/v1/orders", async (req) => ({
@@ -290,6 +317,11 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
       await orders.adminList(await principal(req), queryParam(req, "status"), queryParam(req, "limit"))
     ).map(orderJson),
   }));
+  app.post("/api/v1/admin/orders/expire", async (req) => {
+    const expired = await orders.expireOverdue(await principal(req));
+    metrics.inc("shopflow_orders_expired_total", expired);
+    return { expired };
+  });
   app.post("/api/v1/admin/orders/:id/status", async (req) => {
     const who = await principal(req);
     return orderJson(
@@ -305,7 +337,9 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     scope.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
     scope.post("/api/v1/payments/webhook", async (req) => {
       const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-      return payments.handleWebhook(body, header(req, "x-signature"));
+      const result = await payments.handleWebhook(body, header(req, "x-signature"));
+      if (result.status === "duplicate") metrics.inc("shopflow_webhooks_duplicate_total");
+      return result;
     });
   });
   app.get("/api/v1/admin/outbox", async (req) => ({

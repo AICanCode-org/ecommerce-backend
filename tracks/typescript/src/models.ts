@@ -118,6 +118,7 @@ export interface Order {
   payment: Payment;
   createdAt: Date;
   updatedAt: Date;
+  expiresAt: Date; // v1.1: end of the payment window
 }
 
 /** Everything placeOrder needs to write in ONE transaction. */
@@ -129,6 +130,7 @@ export interface OrderDraft {
   couponCode: string | null;
   paymentId: string;
   at: Date;
+  expiresAt: Date; // v1.1: at + RESERVATION_TTL
 }
 
 export interface NewEvent {

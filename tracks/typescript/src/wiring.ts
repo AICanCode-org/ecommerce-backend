@@ -1,5 +1,6 @@
 // Builds the services from settings. Shared by the process entrypoint and the integration tests.
 import {
+  CircuitBreaker,
   DescriptionService,
   LlmClient,
   LlmParser,
@@ -14,6 +15,7 @@ import { CartService } from "./cart.js";
 import { CatalogService } from "./catalog.js";
 import { systemClock, type Clock } from "./clock.js";
 import type { Settings } from "./config.js";
+import { Metrics } from "./metrics.js";
 import { LogPublisher, OrderService, OutboxService, PaymentService, type EventPublisher } from "./orders.js";
 import type { CartRepository, OrderRepository, ProductRepository, UserRepository } from "./repository.js";
 import { newPaymentId, PasswordHasher, resolveSecret, TokenService } from "./security.js";
@@ -23,13 +25,15 @@ export interface Ai {
   assist: SearchAssistService;
 }
 
-export function buildAi(settings: Settings, warn: (msg: string) => void = console.warn): Ai {
+export function buildAi(
+  settings: Settings,
+  warn: (msg: string) => void = console.warn,
+  metrics: Metrics = new Metrics(),
+): Ai {
   if (settings.aiProvider === "llm") {
-    const client = new LlmClient(
-      settings.llmBaseUrl,
-      settings.llmModel,
-      settings.llmApiKey,
-      settings.llmTimeoutMs,
+    const client = new CircuitBreaker(
+      new LlmClient(settings.llmBaseUrl, settings.llmModel, settings.llmApiKey, settings.llmTimeoutMs),
+      { onShortCircuit: () => metrics.inc("shopflow_llm_short_circuits_total"), warn },
     );
     return {
       descriptions: new DescriptionService(new TemplateWriter(), new LlmWriter(client), warn),
@@ -55,12 +59,14 @@ export interface WireOptions {
   warn?: (msg: string) => void;
   paymentIds?: () => string;
   publisher?: EventPublisher;
+  metrics?: Metrics;
 }
 
 export async function wire(settings: Settings, repos: Repos, opts: WireOptions = {}): Promise<AppDeps> {
   const clock = opts.clock ?? systemClock;
   const warn = opts.warn ?? ((msg: string) => console.warn(msg));
-  const ai = opts.ai ?? buildAi(settings, warn);
+  const metrics = opts.metrics ?? new Metrics();
+  const ai = opts.ai ?? buildAi(settings, warn, metrics);
   const tokens = new TokenService(resolveSecret(settings.jwtSecret, warn), clock);
   const auth = new AuthService(repos.users, new PasswordHasher(settings.bcryptCost), tokens, clock);
   if (settings.adminEmail && settings.adminPassword) {
@@ -77,5 +83,6 @@ export async function wire(settings: Settings, repos: Repos, opts: WireOptions =
     descriptions: ai.descriptions,
     assist: ai.assist,
     clock,
+    metrics,
   };
 }

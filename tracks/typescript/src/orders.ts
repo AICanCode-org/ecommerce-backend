@@ -18,13 +18,14 @@ import { orderEventPayload, type CartRepository, type OrderRepository } from "./
 import { verifyWebhook } from "./security.js";
 import * as v from "./validation.js";
 
-export type Action = "pay" | "fail" | "cancel" | "ship" | "deliver";
+export type Action = "pay" | "fail" | "cancel" | "expire" | "ship" | "deliver";
 
 /** (current status, action) -> new status. Anything else is a 409 invalid-transition. */
 export const TRANSITIONS: Record<string, OrderStatus> = {
   "PENDING_PAYMENT:pay": "PAID",
   "PENDING_PAYMENT:fail": "CANCELLED",
   "PENDING_PAYMENT:cancel": "CANCELLED",
+  "PENDING_PAYMENT:expire": "CANCELLED", // v1.1: the payment window closed
   "PAID:cancel": "CANCELLED",
   "PAID:ship": "SHIPPED",
   "SHIPPED:deliver": "DELIVERED",
@@ -38,6 +39,9 @@ const EVENT_FOR_STATUS: Record<string, string> = {
 };
 export const WEBHOOK_TYPES = ["payment.succeeded", "payment.failed"];
 export const OUTBOX_BATCH = 100;
+/** v1.1: how long an unpaid order holds its stock. */
+export const RESERVATION_TTL_MS = 15 * 60 * 1000;
+export const EXPIRE_BATCH = 100;
 
 export function nextStatus(current: OrderStatus, action: Action): OrderStatus {
   const target = TRANSITIONS[`${current}:${action}`];
@@ -93,6 +97,7 @@ export class OrderService {
       state.lines.map((l) => [l.product.pricePaise, l.quantity]),
       coupon,
     );
+    const now = this.clock();
     try {
       const order = await this.orders.placeOrder({
         userId: principal.userId,
@@ -107,7 +112,8 @@ export class OrderService {
         pricing,
         couponCode: pricing.couponApplied ? state.couponCode : null,
         paymentId: this.newPaymentId(),
-        at: this.clock(),
+        at: now,
+        expiresAt: new Date(now.getTime() + RESERVATION_TTL_MS),
       });
       return { order, replayed: false };
     } catch (err) {
@@ -150,6 +156,21 @@ export class OrderService {
     requireRole(principal, "ADMIN");
     const target = v.orderStatusTarget(v.requireObject(payload).status);
     return this.apply(await this.get(principal, orderId), ACTION_FOR_TARGET[target]!);
+  }
+
+  /**
+   * v1.1: cancel unpaid orders whose payment window closed and put their stock back.
+   * Safe to run any time and from several places at once: each order goes through the same
+   * compare-and-set transition, so an order paid a millisecond ago is simply skipped.
+   */
+  async expireOverdue(principal: Principal): Promise<number> {
+    requireRole(principal, "ADMIN");
+    const now = this.clock();
+    let expired = 0;
+    for (const order of await this.orders.expiredOrders(now, EXPIRE_BATCH)) {
+      if ((await this.orders.applyTransition(transitionFor(order, "expire", now))) === "ok") expired += 1;
+    }
+    return expired;
   }
 
   async apply(order: Order, action: Action): Promise<Order> {
