@@ -1,8 +1,22 @@
 // Checkout, the order state machine, the payment webhook and the transactional outbox.
+import { requireRole } from "./auth.js";
+import { isAdmin } from "./catalog.js";
 import type { Clock } from "./clock.js";
-import { invalidTransition } from "./errors.js";
-import type { Order, OrderStatus, OutboxEvent, Principal, Transition } from "./models.js";
+import {
+  cartEmpty,
+  DuplicateError,
+  InsufficientStockError,
+  insufficientStock,
+  invalidSignature,
+  invalidTransition,
+  notFound,
+  validationError,
+} from "./errors.js";
+import type { NewEvent, Order, OrderStatus, OutboxEvent, Principal, Transition } from "./models.js";
+import { priceCart } from "./money.js";
 import { orderEventPayload, type CartRepository, type OrderRepository } from "./repository.js";
+import { verifyWebhook } from "./security.js";
+import * as v from "./validation.js";
 
 export type Action = "pay" | "fail" | "cancel" | "ship" | "deliver";
 
@@ -15,8 +29,8 @@ export const TRANSITIONS: Record<string, OrderStatus> = {
   "PAID:ship": "SHIPPED",
   "SHIPPED:deliver": "DELIVERED",
 };
-export const ACTION_FOR_TARGET: Record<string, Action> = { SHIPPED: "ship", DELIVERED: "deliver" };
-export const EVENT_FOR_STATUS: Record<string, string> = {
+const ACTION_FOR_TARGET: Record<string, Action> = { SHIPPED: "ship", DELIVERED: "deliver" };
+const EVENT_FOR_STATUS: Record<string, string> = {
   PAID: "order.paid",
   CANCELLED: "order.cancelled",
   SHIPPED: "order.shipped",
@@ -26,22 +40,31 @@ export const WEBHOOK_TYPES = ["payment.succeeded", "payment.failed"];
 export const OUTBOX_BATCH = 100;
 
 export function nextStatus(current: OrderStatus, action: Action): OrderStatus {
-  // TODO(phase-3 M5): look up (current, action) in TRANSITIONS; not there -> 409 invalid-transition 'cannot
-  //   <action> an order that is <status>'.
-  throw new Error("TODO(phase-3 M5): nextStatus");
+  const target = TRANSITIONS[`${current}:${action}`];
+  if (!target) throw invalidTransition(`cannot ${action} an order that is ${current}`);
+  return target;
 }
 
 export const concurrentChange = () =>
   invalidTransition("the order changed while we were updating it: reload and retry");
 
-export const payloadOf = (o: Order, status: OrderStatus) =>
-  orderEventPayload(o.userId, o.id, status, o.totalPaise);
+const payloadOf = (o: Order, status: OrderStatus) => orderEventPayload(o.userId, o.id, status, o.totalPaise);
 
 /** The status change plus its side effects: restock on cancel, outbox events, refund if it was paid. */
 export function transitionFor(order: Order, action: Action, at: Date): Transition {
-  // TODO(phase-3 M5): next_status + the side effects: an outbox event for the new status (EVENT_FOR_STATUS),
-  //   a refund.requested event when a PAID order is cancelled, and restock when the target is CANCELLED.
-  throw new Error("TODO(phase-3 M5): transitionFor");
+  const target = nextStatus(order.status, action);
+  const events: NewEvent[] = [{ type: EVENT_FOR_STATUS[target]!, payload: payloadOf(order, target) }];
+  if (action === "cancel" && order.status === "PAID") {
+    events.push({ type: "refund.requested", payload: payloadOf(order, target) });
+  }
+  return {
+    orderId: order.id,
+    fromStatus: order.status,
+    toStatus: target,
+    at,
+    restock: target === "CANCELLED",
+    events,
+  };
 }
 
 export class OrderService {
@@ -57,28 +80,61 @@ export class OrderService {
     principal: Principal,
     idempotencyKey: string | undefined,
   ): Promise<{ order: Order; replayed: boolean }> {
-    // TODO(phase-3 M5): ADR-0004: validate the Idempotency-Key; an order with that key -> return it
-    //   (replayed=true). Empty cart -> 409 cart-empty; inactive product -> 409 insufficient-stock. Price the
-    //   cart, snapshot the lines and the coupon (only if applied), new payment id, place_order in ONE
-    //   transaction. InsufficientStock -> 409; DuplicateError (same key raced us) -> return the winner,
-    //   replayed.
-    throw new Error("TODO(phase-3 M5): OrderService.checkout");
+    const key = v.idempotencyKey(idempotencyKey);
+    const existing = await this.orders.findOrderByKey(principal.userId, key);
+    if (existing) return { order: existing, replayed: true };
+    const state = await this.carts.cart(principal.userId);
+    if (!state.lines.length) throw cartEmpty();
+    for (const line of state.lines) {
+      if (!line.product.active) throw insufficientStock(`${line.product.sku} is no longer available`);
+    }
+    const coupon = state.couponCode ? await this.carts.findCoupon(state.couponCode) : null;
+    const pricing = priceCart(
+      state.lines.map((l) => [l.product.pricePaise, l.quantity]),
+      coupon,
+    );
+    try {
+      const order = await this.orders.placeOrder({
+        userId: principal.userId,
+        idempotencyKey: key,
+        lines: state.lines.map((l) => ({
+          productId: l.product.id,
+          sku: l.product.sku,
+          name: l.product.name,
+          unitPricePaise: l.product.pricePaise,
+          quantity: l.quantity,
+        })),
+        pricing,
+        couponCode: pricing.couponApplied ? state.couponCode : null,
+        paymentId: this.newPaymentId(),
+        at: this.clock(),
+      });
+      return { order, replayed: false };
+    } catch (err) {
+      if (err instanceof InsufficientStockError) throw insufficientStock(`not enough stock for ${err.sku}`);
+      if (err instanceof DuplicateError) {
+        // The same key raced us (double click, retry after a timeout): return the winner's order.
+        const winner = await this.orders.findOrderByKey(principal.userId, key);
+        if (winner) return { order: winner, replayed: true };
+      }
+      throw err;
+    }
   }
 
   async get(principal: Principal, orderId: number): Promise<Order> {
-    // TODO(phase-3 M5): missing, or someone else's order (unless ADMIN) -> 404 not-found 'order' (never 403:
-    //   don't confirm it exists).
-    throw new Error("TODO(phase-3 M5): OrderService.get");
+    const order = await this.orders.findOrder(orderId);
+    if (!order || (order.userId !== principal.userId && !isAdmin(principal))) {
+      throw notFound("order"); // someone else's order is "not found", never "forbidden"
+    }
+    return order;
   }
 
   async mine(principal: Principal, limit: string | undefined): Promise<Order[]> {
-    // TODO(phase-3 M5): the caller's orders, newest first, validated limit.
-    throw new Error("TODO(phase-3 M5): OrderService.mine");
+    return this.orders.ordersForUser(principal.userId, v.limit(limit));
   }
 
   async cancel(principal: Principal, orderId: number): Promise<Order> {
-    // TODO(phase-3 M5): get (404 rules) then apply 'cancel'.
-    throw new Error("TODO(phase-3 M5): OrderService.cancel");
+    return this.apply(await this.get(principal, orderId), "cancel");
   }
 
   async adminList(
@@ -86,20 +142,20 @@ export class OrderService {
     status: string | undefined,
     limit: string | undefined,
   ): Promise<Order[]> {
-    // TODO(phase-3 M5): ADMIN only; validated status filter and limit.
-    throw new Error("TODO(phase-3 M5): OrderService.adminList");
+    requireRole(principal, "ADMIN");
+    return this.orders.ordersByStatus(v.orderStatusFilter(status), v.limit(limit));
   }
 
   async adminSetStatus(principal: Principal, orderId: number, payload: unknown): Promise<Order> {
-    // TODO(phase-3 M5): ADMIN only; validate status (SHIPPED or DELIVERED), map it to the action
-    //   (ship/deliver), get, apply.
-    throw new Error("TODO(phase-3 M5): OrderService.adminSetStatus");
+    requireRole(principal, "ADMIN");
+    const target = v.orderStatusTarget(v.requireObject(payload).status);
+    return this.apply(await this.get(principal, orderId), ACTION_FOR_TARGET[target]!);
   }
 
   async apply(order: Order, action: Action): Promise<Order> {
-    // TODO(phase-3 M5): apply_transition(transition_for(order, action, now)); anything but 'ok' -> 409 (the
-    //   order changed meanwhile: compare-and-set on the status). Return the order read back.
-    throw new Error("TODO(phase-3 M5): OrderService.apply");
+    const result = await this.orders.applyTransition(transitionFor(order, action, this.clock()));
+    if (result !== "ok") throw concurrentChange();
+    return (await this.orders.findOrder(order.id))!;
   }
 }
 
@@ -117,12 +173,62 @@ export class PaymentService {
   ) {}
 
   async handleWebhook(body: Buffer, signature: string | undefined): Promise<WebhookResult> {
-    // TODO(phase-3 M5): verify the signature on the RAW body FIRST (401 invalid-signature); then JSON object,
-    //   id (8-64 chars), type (payment.succeeded / payment.failed), paymentId; unknown payment -> 404; a seen
-    //   event id -> {status: duplicate}. Decide the transition (see the payments tests: pay, late payment ->
-    //   refund.requested, fail -> cancel + restock, settled -> ignored) and apply it atomically together with
-    //   recording the event; 'duplicate' -> duplicate, 'conflict' -> 409.
-    throw new Error("TODO(phase-3 M5): PaymentService.handleWebhook");
+    if (!verifyWebhook(this.secret, body, signature)) throw invalidSignature();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body.toString("utf8"));
+    } catch {
+      throw validationError("request body must be a JSON object");
+    }
+    const data = v.requireObject(parsed);
+    const { id: eventId, type: kind, paymentId } = data;
+    if (typeof eventId !== "string" || !v.IDEMPOTENCY_KEY_RE.test(eventId)) {
+      throw validationError("id must be 8-64 characters: A-Z, a-z, 0-9, _ and -");
+    }
+    if (typeof kind !== "string" || !WEBHOOK_TYPES.includes(kind)) {
+      throw validationError(`type must be one of ${WEBHOOK_TYPES.join(", ")}`);
+    }
+    if (typeof paymentId !== "string" || !paymentId) throw validationError("paymentId is required");
+    const payment = await this.orders.findPayment(paymentId);
+    if (!payment) throw notFound("payment");
+    if (await this.orders.hasPaymentEvent(eventId)) return { eventId, status: "duplicate" };
+    const order = (await this.orders.findOrder(payment.orderId))!;
+    const now = this.clock();
+    const base = {
+      orderId: order.id,
+      fromStatus: order.status,
+      at: now,
+      paymentId: payment.id,
+      webhookEventId: eventId,
+      webhookEventType: kind,
+    };
+    let t: Transition;
+    let outcome: WebhookResult["status"] = "processed";
+    if (payment.status !== "PENDING") {
+      // A second, different event for a payment we already settled: record it, change nothing.
+      t = { ...base, toStatus: null };
+      outcome = "ignored";
+    } else if (kind === "payment.succeeded" && order.status === "PENDING_PAYMENT") {
+      t = {
+        ...base,
+        toStatus: "PAID",
+        paymentStatus: "SUCCEEDED",
+        events: transitionFor(order, "pay", now).events,
+      };
+    } else if (kind === "payment.succeeded") {
+      // Money arrived for an order that was cancelled meanwhile: keep the order, refund the customer.
+      const refund = { type: "refund.requested", payload: payloadOf(order, order.status) };
+      t = { ...base, toStatus: null, paymentStatus: "SUCCEEDED", events: [refund] };
+    } else if (order.status === "PENDING_PAYMENT") {
+      const fail = transitionFor(order, "fail", now);
+      t = { ...base, toStatus: "CANCELLED", paymentStatus: "FAILED", restock: true, events: fail.events };
+    } else {
+      t = { ...base, toStatus: null, paymentStatus: "FAILED" };
+    }
+    const result = await this.orders.applyTransition(t);
+    if (result === "duplicate") return { eventId, status: "duplicate" };
+    if (result === "conflict") throw concurrentChange(); // 409: the provider retries the webhook later
+    return { eventId, status: outcome };
   }
 }
 
@@ -152,8 +258,9 @@ export class OutboxService {
     pending: string | undefined,
     limit: string | undefined,
   ): Promise<OutboxEvent[]> {
-    // TODO(phase-3 M5): ADMIN only; pending filter (true/false) and limit; events in id order.
-    throw new Error("TODO(phase-3 M5): OutboxService.list");
+    requireRole(principal, "ADMIN");
+    const onlyPending = v.boolFilter(pending, "pending");
+    return this.orders.outbox(onlyPending === true, v.limit(limit));
   }
 
   /**
@@ -162,9 +269,18 @@ export class OutboxService {
    * so consumers de-duplicate on the event id (ADR-0005).
    */
   async publishPending(principal: Principal): Promise<number> {
-    // TODO(phase-3 M5): ADMIN only. The relay (ADR-0005): pending events in id order (OUTBOX_BATCH), publish
-    //   each and mark it published; on the FIRST publish failure log a warning and stop. Return how many were
-    //   published.
-    throw new Error("TODO(phase-3 M5): OutboxService.publishPending");
+    requireRole(principal, "ADMIN");
+    let published = 0;
+    for (const event of await this.orders.outbox(true, OUTBOX_BATCH)) {
+      try {
+        await this.publisher.publish(event);
+      } catch (err) {
+        this.warn(`publishing event ${event.id} failed, will retry: ${(err as Error).message}`);
+        break;
+      }
+      await this.orders.markPublished(event.id, this.clock());
+      published += 1;
+    }
+    return published;
   }
 }

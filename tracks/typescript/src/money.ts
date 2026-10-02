@@ -8,23 +8,46 @@ export const SHIPPING_FEE_PAISE = 4_900; // ₹49
 
 /** ₹ with Indian digit grouping: 12345678 paise -> '₹1,23,456.78'. Negative: '-₹12.00'. */
 export function formatInr(paise: number): string {
-  // TODO(phase-3 M1): Indian digit grouping: 12345678 paise -> '₹1,23,456.78' (last 3 digits, then groups of
-  //   2); negative -> '-₹12.00'. Integer maths only, never floats.
-  throw new Error("TODO(phase-3 M1): formatInr");
+  const sign = paise < 0 ? "-" : "";
+  const abs = Math.abs(paise);
+  const rest = abs % 100;
+  let digits = String((abs - rest) / 100);
+  if (digits.length > 3) {
+    let head = digits.slice(0, -3);
+    const groups: string[] = [];
+    while (head.length > 2) {
+      groups.unshift(head.slice(-2));
+      head = head.slice(0, -2);
+    }
+    if (head) groups.unshift(head);
+    digits = [...groups, digits.slice(-3)].join(",");
+  }
+  return `${sign}₹${digits}.${String(rest).padStart(2, "0")}`;
 }
 
 /** The discount in paise, or null when there is no coupon or it does not apply (minimum not met). */
 export function couponDiscount(subtotalPaise: number, coupon: Coupon | null): number | null {
-  // TODO(phase-3 M1): null when there is no coupon, it is inactive, or the subtotal is below
-  //   min_subtotal_paise. PERCENT: subtotal * value / 100 rounded DOWN, capped at max_discount_paise; FLAT:
-  //   value, but never more than the subtotal.
-  throw new Error("TODO(phase-3 M1): couponDiscount");
+  if (!coupon || !coupon.active || subtotalPaise < coupon.minSubtotalPaise) return null;
+  if (coupon.kind === "PERCENT") {
+    let discount = Math.floor((subtotalPaise * coupon.value) / 100); // rounds down, by less than one paisa
+    if (coupon.maxDiscountPaise !== null) discount = Math.min(discount, coupon.maxDiscountPaise);
+    return discount;
+  }
+  return Math.min(coupon.value, subtotalPaise);
 }
 
 /** lines: [unit price in paise, quantity]. Shipping is free from ₹999 after the discount. */
 export function priceCart(lines: [number, number][], coupon: Coupon | null): Pricing {
-  // TODO(phase-3 M1): subtotal = sum(unit * qty); discount from coupon_discount (couponApplied = it was not
-  //   null); shipping SHIPPING_FEE_PAISE unless the cart is empty or subtotal - discount >=
-  //   FREE_SHIPPING_THRESHOLD_PAISE; total = subtotal - discount + shipping.
-  throw new Error("TODO(phase-3 M1): priceCart");
+  const subtotal = lines.reduce((sum, [unit, qty]) => sum + unit * qty, 0);
+  const found = couponDiscount(subtotal, coupon);
+  const discount = found ?? 0;
+  const shipping =
+    subtotal === 0 || subtotal - discount >= FREE_SHIPPING_THRESHOLD_PAISE ? 0 : SHIPPING_FEE_PAISE;
+  return {
+    subtotalPaise: subtotal,
+    discountPaise: discount,
+    shippingPaise: shipping,
+    totalPaise: subtotal - discount + shipping,
+    couponApplied: found !== null,
+  };
 }

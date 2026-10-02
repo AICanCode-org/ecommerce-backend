@@ -7,20 +7,6 @@ import { describe } from "vitest";
 // See docs/phase-3.
 // ---------------------------------------------------------------------------
 export const PENDING = new Set<string>([
-  "validation", // Phase 3 M1 - validation
-  "money", // Phase 3 M1 - money and pricing
-  "security", // Phase 3 M2 - passwords, tokens, webhook signatures
-  "auth", // Phase 3 M2 - AuthService
-  "api-auth", // Phase 3 M2 - auth endpoints
-  "catalog", // Phase 3 M3 - CatalogService
-  "api-products", // Phase 3 M3 - product endpoints
-  "ai", // Phase 3 M3 - AI descriptions and search assist
-  "api-ai", // Phase 3 M3 - AI endpoints
-  "cart", // Phase 3 M4 - CartService and coupons
-  "api-cart", // Phase 3 M4 - cart endpoints
-  "orders", // Phase 3 M5 - checkout and orders
-  "payments", // Phase 3 M5 - payment webhook
-  "api-orders", // Phase 3 M5 - order, webhook and outbox endpoints
   "integration", // Phase 4 - integration tests
 ]);
 

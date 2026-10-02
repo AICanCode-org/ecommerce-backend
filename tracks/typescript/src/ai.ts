@@ -10,6 +10,7 @@
 // the offline path with fallback=true. The LLM is any OpenAI-compatible /chat/completions endpoint:
 // Ollama locally, or a free Gemini/Groq key.
 import type { Product, SearchFilters } from "./models.js";
+import { collapse, firstSentence, shorten } from "./text.js";
 
 export const DESCRIPTION_MAX = 600;
 export const MAX_TERMS = 5;
@@ -22,15 +23,15 @@ export const STOPWORDS = new Set(
     "upto up less more than at least within"
   ).split(" "),
 );
-export const MONEY_WORDS = /\b(?:rs\.?|inr|rupees?)(?=\s|\d|$)/g;
-export const THOUSANDS = /(?<=\d),(?=\d)/g;
-export const K = /\b(\d+)k\b/g;
-export const BETWEEN = /\bbetween\s+(\d+)\s+(?:and|to)\s+(\d+)\b/;
-export const RANGE = /\b(\d+)\s*(?:-|to)\s*(\d+)\b/;
-export const MAX = /(?:\b(?:under|below|less than|up to|upto|max|within)\s+|<\s*)(\d+)\b/;
-export const MIN = /(?:\b(?:over|above|more than|from|min|at least)\s+|>\s*)(\d+)\b/;
-export const IN_STOCK = /\b(?:in stock|available)\b/;
-export const TERM = /^[a-z0-9]{1,30}$/;
+const MONEY_WORDS = /\b(?:rs\.?|inr|rupees?)(?=\s|\d|$)/g;
+const THOUSANDS = /(?<=\d),(?=\d)/g;
+const K = /\b(\d+)k\b/g;
+const BETWEEN = /\bbetween\s+(\d+)\s+(?:and|to)\s+(\d+)\b/;
+const RANGE = /\b(\d+)\s*(?:-|to)\s*(\d+)\b/;
+const MAX = /(?:\b(?:under|below|less than|up to|upto|max|within)\s+|<\s*)(\d+)\b/;
+const MIN = /(?:\b(?:over|above|more than|from|min|at least)\s+|>\s*)(\d+)\b/;
+const IN_STOCK = /\b(?:in stock|available)\b/;
+const TERM = /^[a-z0-9]{1,30}$/;
 
 export interface Chat {
   chat(system: string, user: string, maxTokens: number): Promise<string>;
@@ -79,10 +80,12 @@ export interface Writer {
 /** Deterministic and offline. The wording is part of the spec (the tests check it exactly). */
 export class TemplateWriter implements Writer {
   async write(product: Product, keywords: string[]): Promise<string> {
-    // TODO(phase-3 M3): deterministic, the wording is part of the spec: '<name> from our <category> range.' +
-    //   first sentence of the description + ' Highlights: a, b.' (if keywords) + ' In stock and ready to ship.'
-    //   or ' Currently out of stock.'; shorten to DESCRIPTION_MAX.
-    throw new Error("TODO(phase-3 M3): TemplateWriter.write");
+    let text = `${product.name} from our ${product.category} range.`;
+    const sentence = firstSentence(product.description);
+    if (sentence) text += ` ${sentence}`;
+    if (keywords.length) text += ` Highlights: ${keywords.join(", ")}.`;
+    text += product.stock > 0 ? " In stock and ready to ship." : " Currently out of stock.";
+    return shorten(text, DESCRIPTION_MAX);
   }
 }
 
@@ -95,10 +98,12 @@ export class LlmWriter implements Writer {
   constructor(private readonly client: Chat) {}
 
   async write(product: Product, keywords: string[]): Promise<string> {
-    // TODO(phase-3 M3): send DESCRIPTION_PROMPT + the product facts between <product> tags (description
-    //   capped at 1000 characters); collapse whitespace; empty answer -> error; shorten to DESCRIPTION_MAX. Let
-    //   errors propagate: DescriptionService falls back.
-    throw new Error("TODO(phase-3 M3): LlmWriter.write");
+    const facts =
+      `<product>\nName: ${product.name}\nCategory: ${product.category}\n` +
+      `Current description: ${[...product.description].slice(0, 1000).join("")}\nKeywords: ${keywords.join(", ")}\n</product>`;
+    const text = collapse(await this.client.chat(DESCRIPTION_PROMPT, facts, 200));
+    if (!text) throw new Error("empty description");
+    return shorten(text, DESCRIPTION_MAX);
   }
 }
 
@@ -116,9 +121,24 @@ export class DescriptionService {
   ) {}
 
   async draft(product: Product, keywords: string[]): Promise<DraftResult> {
-    // TODO(phase-3 M3): LLM if configured; ANY exception -> template with fallback=true (log a warning). No
-    //   LLM -> template, fallback=false.
-    throw new Error("TODO(phase-3 M3): DescriptionService.draft");
+    if (this.llm) {
+      try {
+        return { provider: "llm", fallback: false, description: await this.llm.write(product, keywords) };
+      } catch (err) {
+        // any LLM failure -> graceful fallback
+        this.warn(`LLM description failed, using the template: ${(err as Error).message}`);
+        return {
+          provider: "template",
+          fallback: true,
+          description: await this.template.write(product, keywords),
+        };
+      }
+    }
+    return {
+      provider: "template",
+      fallback: false,
+      description: await this.template.write(product, keywords),
+    };
   }
 }
 
@@ -127,26 +147,65 @@ export interface Parser {
   parse(query: string, categories: string[]): Promise<SearchFilters>;
 }
 
-export const paise = (rupees: number) => Math.min(rupees, MAX_RUPEES) * 100;
+const paise = (rupees: number) => Math.min(rupees, MAX_RUPEES) * 100;
 
 /** 'shoe' and 'shoes' both match the category 'shoes'; 'bags' matches 'bag'. */
 export function matchCategory(token: string, categories: string[]): string | null {
-  // TODO(phase-3 M3): 'shoe' and 'shoes' both match the category 'shoes'; 'bags' matches 'bag': token == c,
-  //   token + 's' == c, or token minus a trailing 's' == c.
-  throw new Error("TODO(phase-3 M3): matchCategory");
+  for (const c of categories) {
+    if (token === c || token + "s" === c || (token.endsWith("s") && token.slice(0, -1) === c)) return c;
+  }
+  return null;
 }
 
-export const cut = (text: string, m: RegExpExecArray) =>
+const cut = (text: string, m: RegExpExecArray) =>
   text.slice(0, m.index) + " " + text.slice(m.index + m[0].length);
 
 /** Deterministic and offline. The patterns and their order are part of the spec. */
 export class RuleParser implements Parser {
   async parse(query: string, categories: string[]): Promise<SearchFilters> {
-    // TODO(phase-3 M3): deterministic, the order is part of the spec: lower-case, drop ₹ and thousands
-    //   separators and money words, '3k' -> 3000; then between/range, under/max, over/min (whole rupees ->
-    //   paise, capped at MAX_RUPEES), 'in stock'; the first token that matches a category is the category;
-    //   other tokens (not stopwords, not numbers, unique, <= 30 chars) are terms, at most MAX_TERMS.
-    throw new Error("TODO(phase-3 M3): RuleParser.parse");
+    let text = query.toLowerCase().replaceAll("₹", " ");
+    text = text.replace(THOUSANDS, "").replace(MONEY_WORDS, " ");
+    text = text.replace(K, (_m, n: string) => String(Number(n) * 1000));
+    let lo: number | null = null;
+    let hi: number | null = null;
+    let m = BETWEEN.exec(text) ?? RANGE.exec(text);
+    if (m) {
+      const [a, b] = [Number(m[1]), Number(m[2])].sort((x, y) => x - y) as [number, number];
+      lo = paise(a);
+      hi = paise(b);
+      text = cut(text, m);
+    }
+    m = MAX.exec(text);
+    if (m) {
+      hi = paise(Number(m[1]));
+      text = cut(text, m);
+    }
+    m = MIN.exec(text);
+    if (m) {
+      lo = paise(Number(m[1]));
+      text = cut(text, m);
+    }
+    let inStock: boolean | null = null;
+    m = IN_STOCK.exec(text);
+    if (m) {
+      inStock = true;
+      text = cut(text, m);
+    }
+    let category: string | null = null;
+    const terms: string[] = [];
+    for (const token of text.match(/[a-z0-9]+/g) ?? []) {
+      const found: string | null = category === null ? matchCategory(token, categories) : null;
+      if (found) category = found;
+      else if (
+        !STOPWORDS.has(token) &&
+        !/^[0-9]+$/.test(token) &&
+        !terms.includes(token) &&
+        token.length <= 30
+      ) {
+        terms.push(token);
+      }
+    }
+    return { terms: terms.slice(0, MAX_TERMS), category, minPricePaise: lo, maxPricePaise: hi, inStock };
   }
 }
 
@@ -156,28 +215,55 @@ export const searchPrompt = (categories: string[]) =>
   'ONLY a JSON object: {"terms": [up to 5 lowercase words], "category": one allowed category or null, ' +
   '"minPrice": whole rupees or null, "maxPrice": whole rupees or null, "inStock": true or null}.';
 
-export function price(value: unknown): number | null {
-  // TODO(phase-3 M3): helper for parse_filters: null stays null; otherwise an integer number of rupees
-  //   0..MAX_RUPEES (booleans are not numbers) -> paise, else throw.
-  throw new Error("TODO(phase-3 M3): price");
+function price(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_RUPEES) {
+    throw new Error(`price out of range: ${JSON.stringify(value)}`);
+  }
+  return value * 100;
 }
 
 /** Validate the model's answer like untrusted user input. Anything unexpected throws -> fallback. */
 export function parseFilters(raw: string, categories: string[]): SearchFilters {
-  // TODO(phase-3 M3): treat the model's answer like untrusted input: find the JSON object; terms a list of <=
-  //   5 words matching _TERM (lower-cased, unique); category null or one of the allowed ones; minPrice/maxPrice
-  //   whole rupees 0..MAX_RUPEES (not booleans) and min <= max; inStock true/false/null. Anything else -> throw
-  //   (the caller falls back).
-  throw new Error("TODO(phase-3 M3): parseFilters");
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end < start) throw new Error("no JSON object in LLM answer");
+  const data = JSON.parse(raw.slice(start, end + 1)) as unknown;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("not a JSON object");
+  const d = data as Record<string, unknown>;
+  const terms = d.terms ?? [];
+  if (!Array.isArray(terms) || terms.length > MAX_TERMS)
+    throw new Error("terms must be a list of at most 5 words");
+  const clean: string[] = [];
+  for (const t of terms) {
+    if (typeof t !== "string" || !TERM.test(t.toLowerCase()))
+      throw new Error(`bad term ${JSON.stringify(t)}`);
+    if (!clean.includes(t.toLowerCase())) clean.push(t.toLowerCase());
+  }
+  const category = d.category ?? null;
+  if (category !== null && (typeof category !== "string" || !categories.includes(category))) {
+    throw new Error(`unknown category ${JSON.stringify(category)}`);
+  }
+  const lo = price(d.minPrice);
+  const hi = price(d.maxPrice);
+  if (lo !== null && hi !== null && lo > hi) throw new Error("minPrice > maxPrice");
+  const inStock = d.inStock ?? null;
+  if (inStock !== null && typeof inStock !== "boolean") throw new Error("inStock must be true or null");
+  return {
+    terms: clean,
+    category: category as string | null,
+    minPricePaise: lo,
+    maxPricePaise: hi,
+    inStock: inStock === true ? true : null,
+  };
 }
 
 export class LlmParser implements Parser {
   constructor(private readonly client: Chat) {}
 
   async parse(query: string, categories: string[]): Promise<SearchFilters> {
-    // TODO(phase-3 M3): system = the search prompt with the allowed categories, user = the query between
-    //   <query> tags; return parse_filters(answer).
-    throw new Error("TODO(phase-3 M3): LlmParser.parse");
+    const raw = await this.client.chat(searchPrompt(categories), `<query>\n${query}\n</query>`, 120);
+    return parseFilters(raw, categories);
   }
 }
 
@@ -195,8 +281,15 @@ export class SearchAssistService {
   ) {}
 
   async interpret(query: string, categories: string[]): Promise<AssistResult> {
-    // TODO(phase-3 M3): LLM if configured; ANY exception -> rules with fallback=true (log a warning). No LLM
-    //   -> rules, fallback=false.
-    throw new Error("TODO(phase-3 M3): SearchAssistService.interpret");
+    if (this.llm) {
+      try {
+        return { provider: "llm", fallback: false, filters: await this.llm.parse(query, categories) };
+      } catch (err) {
+        // any LLM failure -> graceful fallback
+        this.warn(`LLM search assist failed, using the rules: ${(err as Error).message}`);
+        return { provider: "rules", fallback: true, filters: await this.rules.parse(query, categories) };
+      }
+    }
+    return { provider: "rules", fallback: false, filters: await this.rules.parse(query, categories) };
   }
 }

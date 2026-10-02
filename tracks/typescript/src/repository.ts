@@ -24,11 +24,6 @@ import type {
   User,
 } from "./models.js";
 
-/** Starter helper: marks code you still have to write (returns `never`, so types still check). */
-const todo = (what: string): never => {
-  throw new Error(what);
-};
-
 export const PAYMENT_PROVIDER = "fakepay";
 export const DEMO_COUPONS: Coupon[] = [
   { code: "SAVE10", kind: "PERCENT", value: 10, minSubtotalPaise: 0, maxDiscountPaise: 20_000, active: true },
@@ -100,10 +95,10 @@ export const orderEventPayload = (
 // PostgreSQL
 // ---------------------------------------------------------------------------------------------
 type Row = Record<string, unknown>;
-export const USER_COLS = "id, email, password_hash, display_name, role, created_at";
-export const PRODUCT_COLS =
+const USER_COLS = "id, email, password_hash, display_name, role, created_at";
+const PRODUCT_COLS =
   "id, sku, name, description, category, price_paise, stock, active, version, created_at, updated_at";
-export const ORDER_SELECT = `
+const ORDER_SELECT = `
 SELECT o.id, o.user_id, o.status, o.subtotal_paise, o.discount_paise, o.shipping_paise, o.total_paise,
        o.coupon_code, o.idempotency_key, o.created_at, o.updated_at,
        p.id AS payment_id, p.provider, p.status AS payment_status, p.amount_paise,
@@ -115,7 +110,7 @@ FROM orders o JOIN payments p ON p.order_id = o.id
 `;
 
 const num = (v: unknown) => Number(v); // BIGINT arrives as a string: exact up to 2^53, plenty here
-export const toUser = (r: Row): User => ({
+const toUser = (r: Row): User => ({
   id: num(r.id),
   email: r.email as string,
   passwordHash: r.password_hash as string,
@@ -123,7 +118,7 @@ export const toUser = (r: Row): User => ({
   role: r.role as Role,
   createdAt: r.created_at as Date,
 });
-export const toProduct = (r: Row): Product => ({
+const toProduct = (r: Row): Product => ({
   id: num(r.id),
   sku: r.sku as string,
   name: r.name as string,
@@ -136,7 +131,7 @@ export const toProduct = (r: Row): Product => ({
   createdAt: r.created_at as Date,
   updatedAt: r.updated_at as Date,
 });
-export const toPayment = (r: Row): Payment => ({
+const toPayment = (r: Row): Payment => ({
   id: r.id as string,
   orderId: num(r.order_id),
   provider: r.provider as string,
@@ -145,7 +140,7 @@ export const toPayment = (r: Row): Payment => ({
   createdAt: r.created_at as Date,
   updatedAt: r.updated_at as Date,
 });
-export const toOrder = (r: Row): Order => ({
+const toOrder = (r: Row): Order => ({
   id: num(r.id),
   userId: num(r.user_id),
   status: r.status as OrderStatus,
@@ -174,7 +169,7 @@ export const toOrder = (r: Row): Order => ({
   createdAt: r.created_at as Date,
   updatedAt: r.updated_at as Date,
 });
-export const toEvent = (r: Row): OutboxEvent => ({
+const toEvent = (r: Row): OutboxEvent => ({
   id: num(r.id),
   type: r.type as string,
   orderId: num(r.order_id),
@@ -183,18 +178,15 @@ export const toEvent = (r: Row): OutboxEvent => ({
   publishedAt: (r.published_at as Date | null) ?? null,
 });
 
-export const isUniqueViolation = (err: unknown) => (err as { code?: string }).code === "23505";
+const isUniqueViolation = (err: unknown) => (err as { code?: string }).code === "23505";
 
-export class Rollback extends Error {
+class Rollback extends Error {
   constructor(readonly result: TransitionResult) {
     super(result);
   }
 }
 
-export async function inTransaction<T>(
-  pool: pg.Pool,
-  work: (client: pg.PoolClient) => Promise<T>,
-): Promise<T> {
+async function inTransaction<T>(pool: pg.Pool, work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -224,23 +216,31 @@ abstract class Pg {
 
 export class PgUserRepository extends Pg implements UserRepository {
   async insertUser(email: string, passwordHash: string, displayName: string, role: Role, at: Date) {
-    // TODO(phase-3 M2): INSERT ... RETURNING; a unique violation on email (SQLSTATE 23505) -> DuplicateError.
-    return todo("TODO(phase-3 M2): PgUserRepository.insertUser");
+    try {
+      const row = await this.one(
+        `INSERT INTO users (email, password_hash, display_name, role, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING ${USER_COLS}`,
+        [email, passwordHash, displayName, role, at],
+      );
+      return toUser(row!);
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new DuplicateError("email");
+      throw err;
+    }
   }
 
   async findUserByEmail(email: string) {
-    // TODO(phase-3 M2): SELECT by email (already lower-cased).
-    return todo("TODO(phase-3 M2): PgUserRepository.findUserByEmail");
+    const row = await this.one(`SELECT ${USER_COLS} FROM users WHERE email = $1`, [email]);
+    return row ? toUser(row) : null;
   }
 
   async findUser(id: number) {
-    // TODO(phase-3 M2): SELECT by id.
-    return todo("TODO(phase-3 M2): PgUserRepository.findUser");
+    const row = await this.one(`SELECT ${USER_COLS} FROM users WHERE id = $1`, [id]);
+    return row ? toUser(row) : null;
   }
 
   async updateRole(id: number, role: Role) {
-    // TODO(phase-3 M2): UPDATE ... RETURNING; null when the user does not exist.
-    return todo("TODO(phase-3 M2): PgUserRepository.updateRole");
+    const row = await this.one(`UPDATE users SET role = $1 WHERE id = $2 RETURNING ${USER_COLS}`, [role, id]);
+    return row ? toUser(row) : null;
   }
 
   async ping() {
@@ -255,125 +255,291 @@ export class PgUserRepository extends Pg implements UserRepository {
 
 export class PgProductRepository extends Pg implements ProductRepository {
   async insertProduct(p: Product) {
-    // TODO(phase-3 M3): INSERT ... RETURNING; unique violation on sku -> DuplicateError.
-    return todo("TODO(phase-3 M3): PgProductRepository.insertProduct");
+    try {
+      const row = await this.one(
+        `INSERT INTO products (sku, name, description, category, price_paise, stock, active, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${PRODUCT_COLS}`,
+        [p.sku, p.name, p.description, p.category, p.pricePaise, p.stock, p.active, p.createdAt, p.updatedAt],
+      );
+      return toProduct(row!);
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new DuplicateError("sku");
+      throw err;
+    }
   }
 
   async findProduct(sku: string) {
-    // TODO(phase-3 M3): SELECT by sku (active or not: the service decides who may see it).
-    return todo("TODO(phase-3 M3): PgProductRepository.findProduct");
+    const row = await this.one(`SELECT ${PRODUCT_COLS} FROM products WHERE sku = $1`, [sku]);
+    return row ? toProduct(row) : null;
   }
 
   async updateProduct(p: Product, expectedVersion: number) {
-    // TODO(phase-3 M3): UPDATE ... SET ..., version = version + 1 WHERE id = ? AND version = ? RETURNING; 0
-    //   rows -> null (conflict).
-    return todo("TODO(phase-3 M3): PgProductRepository.updateProduct");
+    // Optimistic locking: the WHERE clause only matches if nobody saved in between (ADR-0003).
+    const row = await this.one(
+      `UPDATE products SET name = $1, description = $2, category = $3, price_paise = $4, active = $5,
+         updated_at = $6, version = version + 1 WHERE id = $7 AND version = $8 RETURNING ${PRODUCT_COLS}`,
+      [p.name, p.description, p.category, p.pricePaise, p.active, p.updatedAt, p.id, expectedVersion],
+    );
+    return row ? toProduct(row) : null;
   }
 
   async adjustStock(productId: number, delta: number, at: Date) {
-    // TODO(phase-3 M3): ONE statement: UPDATE products SET stock = stock + delta WHERE id = ? AND stock +
-    //   delta >= 0 RETURNING; 0 rows -> null. Never read-then-write (ADR-0002).
-    return todo("TODO(phase-3 M3): PgProductRepository.adjustStock");
+    // One statement, guarded: never read-modify-write stock in application code (ADR-0002).
+    const row = await this.one(
+      `UPDATE products SET stock = stock + $1, updated_at = $2 WHERE id = $3 AND stock + $1 >= 0 RETURNING ${PRODUCT_COLS}`,
+      [delta, at, productId],
+    );
+    return row ? toProduct(row) : null;
   }
 
   async searchProducts(q: ProductQuery) {
-    // TODO(phase-3 M3): active products WHERE id > after_id [AND search_vector @@ plainto_tsquery('english',
-    //   q)] [AND category] [AND price range] [AND stock > 0 / stock = 0 for inStock true/false] ORDER BY id
-    //   LIMIT n.
-    return todo("TODO(phase-3 M3): PgProductRepository.searchProducts");
+    const where = ["active"];
+    const params: unknown[] = [];
+    const add = (clause: string, value: unknown) => {
+      params.push(value);
+      where.push(clause.replace("?", `$${params.length}`));
+    };
+    if (q.afterId != null) add("id > ?", q.afterId); // keyset pagination: no OFFSET scan
+    if (q.q) add("search_vector @@ plainto_tsquery('english', ?)", q.q);
+    if (q.category) add("category = ?", q.category);
+    if (q.minPricePaise != null) add("price_paise >= ?", q.minPricePaise);
+    if (q.maxPricePaise != null) add("price_paise <= ?", q.maxPricePaise);
+    if (q.inStock != null) where.push(q.inStock ? "stock > 0" : "stock = 0");
+    params.push(q.limit);
+    const rows = await this.all(
+      `SELECT ${PRODUCT_COLS} FROM products WHERE ${where.join(" AND ")} ORDER BY id LIMIT $${params.length}`,
+      params,
+    );
+    return rows.map(toProduct);
   }
 
   async categories() {
-    // TODO(phase-3 M3): SELECT category, COUNT(*) FROM products WHERE active GROUP BY category ORDER BY
-    //   category.
-    return todo("TODO(phase-3 M3): PgProductRepository.categories");
+    const rows = await this.all(
+      "SELECT category, COUNT(*) AS n FROM products WHERE active GROUP BY category ORDER BY category",
+      [],
+    );
+    return rows.map((r) => ({ name: r.category as string, products: num(r.n) }));
   }
 }
 
 export class PgCartRepository extends Pg implements CartRepository {
   async cart(userId: number) {
-    // TODO(phase-3 M4): the user's cart lines joined with their products (ORDER BY added_at, product id) and
-    //   the cart's coupon code; no cart row -> empty.
-    return todo("TODO(phase-3 M4): PgCartRepository.cart");
+    const cols = PRODUCT_COLS.split(", ")
+      .map((c) => `p.${c}`)
+      .join(", ");
+    const rows = await this.all(
+      `SELECT ${cols}, ci.quantity FROM cart_items ci JOIN products p ON p.id = ci.product_id
+       WHERE ci.user_id = $1 ORDER BY ci.added_at, p.id`,
+      [userId],
+    );
+    const coupon = await this.one("SELECT coupon_code FROM carts WHERE user_id = $1", [userId]);
+    return {
+      lines: rows.map((r) => ({ product: toProduct(r), quantity: num(r.quantity) })),
+      couponCode: (coupon?.coupon_code as string | null) ?? null,
+    };
   }
 
   async setCartItem(userId: number, productId: number, quantity: number, at: Date) {
-    // TODO(phase-3 M4): upsert the cart row, then INSERT ... ON CONFLICT (user_id, product_id) DO UPDATE SET
-    //   quantity = EXCLUDED.quantity.
-    return todo("TODO(phase-3 M4): PgCartRepository.setCartItem");
+    await this.pool.query(
+      `INSERT INTO cart_items (user_id, product_id, quantity, added_at) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, product_id) DO UPDATE SET quantity = EXCLUDED.quantity`,
+      [userId, productId, quantity, at],
+    );
   }
 
   async removeCartItem(userId: number, productId: number) {
-    // TODO(phase-3 M4): DELETE the line (no error when it is not there).
-    return todo("TODO(phase-3 M4): PgCartRepository.removeCartItem");
+    await this.pool.query("DELETE FROM cart_items WHERE user_id = $1 AND product_id = $2", [
+      userId,
+      productId,
+    ]);
   }
 
   async setCoupon(userId: number, code: string | null, at: Date) {
-    // TODO(phase-3 M4): upsert the cart row with the coupon code (null clears it).
-    return todo("TODO(phase-3 M4): PgCartRepository.setCoupon");
+    await this.pool.query(
+      `INSERT INTO carts (user_id, coupon_code, updated_at) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id) DO UPDATE SET coupon_code = EXCLUDED.coupon_code, updated_at = EXCLUDED.updated_at`,
+      [userId, code, at],
+    );
   }
 
   async findCoupon(code: string) {
-    // TODO(phase-3 M4): SELECT the coupon by code (the service checks active).
-    return todo("TODO(phase-3 M4): PgCartRepository.findCoupon");
+    const r = await this.one(
+      "SELECT code, kind, value, min_subtotal_paise, max_discount_paise, active FROM coupons WHERE code = $1",
+      [code],
+    );
+    if (!r) return null;
+    return {
+      code: r.code as string,
+      kind: r.kind as Coupon["kind"],
+      value: num(r.value),
+      minSubtotalPaise: num(r.min_subtotal_paise),
+      maxDiscountPaise: r.max_discount_paise === null ? null : num(r.max_discount_paise),
+      active: r.active as boolean,
+    };
   }
 }
 
 export class PgOrderRepository extends Pg implements OrderRepository {
   async findOrderByKey(userId: number, key: string) {
-    // TODO(phase-3 M5): the order with this (user id, idempotency key), or null.
-    return todo("TODO(phase-3 M5): PgOrderRepository.findOrderByKey");
+    const row = await this.one(`${ORDER_SELECT} WHERE o.user_id = $1 AND o.idempotency_key = $2`, [
+      userId,
+      key,
+    ]);
+    return row ? toOrder(row) : null;
   }
 
   /** ONE transaction: stock, order, lines, payment, outbox, empty cart. Any failure -> nothing written. */
   async placeOrder(d: OrderDraft) {
-    // TODO(phase-3 M5): ONE transaction: for every line a GUARDED stock decrement (WHERE id = ? AND active
-    //   AND stock >= qty; 0 rows -> InsufficientStock + rollback), INSERT the order (unique (user, key) ->
-    //   DuplicateError), its lines, the PENDING payment, an order.placed outbox event, and empty the cart.
-    return todo("TODO(phase-3 M5): PgOrderRepository.placeOrder");
+    try {
+      return await inTransaction(this.pool, async (db) => {
+        // Lock rows in a fixed order (product id) so two checkouts can never deadlock.
+        for (const line of [...d.lines].sort((a, b) => a.productId - b.productId)) {
+          const r = await db.query(
+            "UPDATE products SET stock = stock - $1, updated_at = $2 WHERE id = $3 AND active AND stock >= $1",
+            [line.quantity, d.at, line.productId],
+          );
+          if (r.rowCount !== 1) throw new InsufficientStockError(line.sku);
+        }
+        const p = d.pricing;
+        const { rows } = await db.query(
+          `INSERT INTO orders (user_id, status, subtotal_paise, discount_paise, shipping_paise, total_paise,
+             coupon_code, idempotency_key, created_at, updated_at)
+           VALUES ($1, 'PENDING_PAYMENT', $2, $3, $4, $5, $6, $7, $8, $8) RETURNING id`,
+          [
+            d.userId,
+            p.subtotalPaise,
+            p.discountPaise,
+            p.shippingPaise,
+            p.totalPaise,
+            d.couponCode,
+            d.idempotencyKey,
+            d.at,
+          ],
+        );
+        const orderId = num(rows[0].id);
+        for (const [i, line] of d.lines.entries()) {
+          await db.query(
+            `INSERT INTO order_items (order_id, line_no, product_id, sku, name, unit_price_paise, quantity)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [orderId, i + 1, line.productId, line.sku, line.name, line.unitPricePaise, line.quantity],
+          );
+        }
+        await db.query(
+          `INSERT INTO payments (id, order_id, provider, status, amount_paise, created_at, updated_at)
+           VALUES ($1, $2, $3, 'PENDING', $4, $5, $5)`,
+          [d.paymentId, orderId, PAYMENT_PROVIDER, p.totalPaise, d.at],
+        );
+        await db.query(
+          "INSERT INTO outbox_events (type, order_id, payload, created_at) VALUES ('order.placed', $1, $2, $3)",
+          [orderId, orderEventPayload(d.userId, orderId, "PENDING_PAYMENT", p.totalPaise), d.at],
+        );
+        await db.query("DELETE FROM cart_items WHERE user_id = $1", [d.userId]);
+        await db.query("UPDATE carts SET coupon_code = NULL, updated_at = $1 WHERE user_id = $2", [
+          d.at,
+          d.userId,
+        ]);
+        const order = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [orderId]);
+        return toOrder(order.rows[0]);
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new DuplicateError("idempotency_key");
+      throw err;
+    }
   }
 
   async findOrder(id: number) {
-    // TODO(phase-3 M5): the order by id with its lines, or null.
-    return todo("TODO(phase-3 M5): PgOrderRepository.findOrder");
+    const row = await this.one(`${ORDER_SELECT} WHERE o.id = $1`, [id]);
+    return row ? toOrder(row) : null;
   }
 
   async ordersForUser(userId: number, limit: number) {
-    // TODO(phase-3 M5): the user's orders, newest first (ORDER BY id DESC), LIMIT n.
-    return todo("TODO(phase-3 M5): PgOrderRepository.ordersForUser");
+    return (
+      await this.all(`${ORDER_SELECT} WHERE o.user_id = $1 ORDER BY o.id DESC LIMIT $2`, [userId, limit])
+    ).map(toOrder);
   }
 
   async ordersByStatus(status: OrderStatus | null, limit: number) {
-    // TODO(phase-3 M5): all orders [with this status], newest first, LIMIT n.
-    return todo("TODO(phase-3 M5): PgOrderRepository.ordersByStatus");
+    const rows =
+      status === null
+        ? await this.all(`${ORDER_SELECT} ORDER BY o.id DESC LIMIT $1`, [limit])
+        : await this.all(`${ORDER_SELECT} WHERE o.status = $1 ORDER BY o.id DESC LIMIT $2`, [status, limit]);
+    return rows.map(toOrder);
   }
 
   async findPayment(paymentId: string) {
-    // TODO(phase-3 M5): the payment by its provider id, or null.
-    return todo("TODO(phase-3 M5): PgOrderRepository.findPayment");
+    const row = await this.one(
+      "SELECT id, order_id, provider, status, amount_paise, created_at, updated_at FROM payments WHERE id = $1",
+      [paymentId],
+    );
+    return row ? toPayment(row) : null;
   }
 
   async hasPaymentEvent(eventId: string) {
-    // TODO(phase-3 M5): true when this webhook event id was already recorded.
-    return todo("TODO(phase-3 M5): PgOrderRepository.hasPaymentEvent");
+    return (await this.one("SELECT 1 AS x FROM payment_events WHERE event_id = $1", [eventId])) !== null;
   }
 
   /** ONE transaction. Throwing inside it rolls everything back. */
   async applyTransition(t: Transition): Promise<TransitionResult> {
-    // TODO(phase-3 M5): ONE transaction: record the webhook event if any (unique id -> 'duplicate'), compare-
-    //   and-set the order status (UPDATE ... WHERE id AND status = from; 0 rows -> 'conflict' + rollback),
-    //   update the payment, restock, insert the outbox events. 'ok' when it all committed.
-    throw new Error("TODO(phase-3 M5): PgOrderRepository.applyTransition");
+    try {
+      await inTransaction(this.pool, async (db) => {
+        if (t.webhookEventId) {
+          const r = await db.query(
+            `INSERT INTO payment_events (event_id, payment_id, type, received_at) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (event_id) DO NOTHING`,
+            [t.webhookEventId, t.paymentId, t.webhookEventType, t.at],
+          );
+          if (r.rowCount === 0) throw new Rollback("duplicate");
+        }
+        if (t.paymentStatus) {
+          const r = await db.query(
+            "UPDATE payments SET status = $1, updated_at = $2 WHERE id = $3 AND status = 'PENDING'",
+            [t.paymentStatus, t.at, t.paymentId],
+          );
+          if (r.rowCount !== 1) throw new Rollback("conflict");
+        }
+        if (t.toStatus) {
+          // Compare-and-set on the status: two admins (or an admin and a webhook) cannot both win.
+          const r = await db.query(
+            "UPDATE orders SET status = $1, updated_at = $2 WHERE id = $3 AND status = $4",
+            [t.toStatus, t.at, t.orderId, t.fromStatus],
+          );
+          if (r.rowCount !== 1) throw new Rollback("conflict");
+        }
+        if (t.restock) {
+          await db.query(
+            `UPDATE products p SET stock = p.stock + i.quantity, updated_at = $1
+             FROM order_items i WHERE i.order_id = $2 AND p.id = i.product_id`,
+            [t.at, t.orderId],
+          );
+        }
+        for (const e of t.events ?? []) {
+          await db.query(
+            "INSERT INTO outbox_events (type, order_id, payload, created_at) VALUES ($1, $2, $3, $4)",
+            [e.type, t.orderId, e.payload, t.at],
+          );
+        }
+      });
+    } catch (err) {
+      if (err instanceof Rollback) return err.result;
+      throw err;
+    }
+    return "ok";
   }
 
   async outbox(pendingOnly: boolean, limit: number) {
-    // TODO(phase-3 M5): outbox events [only unpublished] ORDER BY id LIMIT n.
-    return todo("TODO(phase-3 M5): PgOrderRepository.outbox");
+    const where = pendingOnly ? "WHERE published_at IS NULL " : "";
+    const rows = await this.all(
+      `SELECT id, type, order_id, payload, created_at, published_at FROM outbox_events ${where}ORDER BY id LIMIT $1`,
+      [limit],
+    );
+    return rows.map(toEvent);
   }
 
   async markPublished(eventId: number, at: Date) {
-    // TODO(phase-3 M5): set published_at on the event (only if it is still null).
-    return todo("TODO(phase-3 M5): PgOrderRepository.markPublished");
+    await this.pool.query(
+      "UPDATE outbox_events SET published_at = $1 WHERE id = $2 AND published_at IS NULL",
+      [at, eventId],
+    );
   }
 }
 

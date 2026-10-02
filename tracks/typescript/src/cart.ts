@@ -1,7 +1,10 @@
 // The cart: one per signed-in user, stored in the database, priced live with current prices.
 import type { Clock } from "./clock.js";
+import { insufficientStock, notFound, validationError } from "./errors.js";
 import type { CartView, Principal } from "./models.js";
+import { priceCart } from "./money.js";
 import type { CartRepository, ProductRepository } from "./repository.js";
+import * as v from "./validation.js";
 
 export const MAX_LINES = 20;
 
@@ -13,32 +16,45 @@ export class CartService {
   ) {}
 
   async view(principal: Principal): Promise<CartView> {
-    // TODO(phase-3 M4): the cart lines + coupon code, priced with price_cart (the coupon may no longer apply:
-    //   then couponApplied is false).
-    throw new Error("TODO(phase-3 M4): CartService.view");
+    const state = await this.carts.cart(principal.userId);
+    const coupon = state.couponCode ? await this.carts.findCoupon(state.couponCode) : null;
+    const pricing = priceCart(
+      state.lines.map((l) => [l.product.pricePaise, l.quantity]),
+      coupon,
+    );
+    return { ...state, pricing };
   }
 
   async setItem(principal: Principal, sku: string, payload: unknown): Promise<CartView> {
-    // TODO(phase-3 M4): validate quantity; the product must exist and be active (404); quantity > stock ->
-    //   409 insufficient-stock; a NEW line when the cart already has MAX_LINES lines -> 400; upsert the line
-    //   (it sets the quantity, it does not add) and return the view.
-    throw new Error("TODO(phase-3 M4): CartService.setItem");
+    const qty = v.quantity(v.requireObject(payload).quantity);
+    const product = await this.products.findProduct(sku.trim().toUpperCase());
+    if (!product || !product.active) throw notFound("product");
+    if (qty > product.stock) throw insufficientStock(`only ${product.stock} left of ${product.sku}`);
+    const { lines } = await this.carts.cart(principal.userId);
+    if (lines.length >= MAX_LINES && lines.every((l) => l.product.id !== product.id)) {
+      throw validationError(`a cart holds at most ${MAX_LINES} different products`);
+    }
+    await this.carts.setCartItem(principal.userId, product.id, qty, this.clock());
+    return this.view(principal);
   }
 
   async removeItem(principal: Principal, sku: string): Promise<CartView> {
-    // TODO(phase-3 M4): unknown sku -> 404; removing a line that is not in the cart is fine (idempotent);
-    //   return the view.
-    throw new Error("TODO(phase-3 M4): CartService.removeItem");
+    const product = await this.products.findProduct(sku.trim().toUpperCase());
+    if (!product) throw notFound("product");
+    await this.carts.removeCartItem(principal.userId, product.id); // idempotent: removing twice is fine
+    return this.view(principal);
   }
 
   async applyCoupon(principal: Principal, payload: unknown): Promise<CartView> {
-    // TODO(phase-3 M4): validate the code; unknown or inactive coupon -> 404 not-found 'coupon'; store it on
-    //   the cart and return the view.
-    throw new Error("TODO(phase-3 M4): CartService.applyCoupon");
+    const code = v.couponCode(v.requireObject(payload).code);
+    const coupon = await this.carts.findCoupon(code);
+    if (!coupon || !coupon.active) throw notFound("coupon");
+    await this.carts.setCoupon(principal.userId, code, this.clock());
+    return this.view(principal);
   }
 
   async removeCoupon(principal: Principal): Promise<CartView> {
-    // TODO(phase-3 M4): clear the cart's coupon and return the view.
-    throw new Error("TODO(phase-3 M4): CartService.removeCoupon");
+    await this.carts.setCoupon(principal.userId, null, this.clock());
+    return this.view(principal);
   }
 }

@@ -1,8 +1,10 @@
 // Passwords (bcrypt), access tokens (JWT, HS256) and webhook signatures (HMAC-SHA256).
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
+import { jwtVerify, SignJWT } from "jose";
 import type { Clock } from "./clock.js";
-import { type Principal, type User } from "./models.js";
+import { unauthorized } from "./errors.js";
+import { ROLES, type Principal, type Role, type User } from "./models.js";
 
 export const ISSUER = "shopflow";
 export const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
@@ -20,14 +22,17 @@ export class PasswordHasher {
   }
 
   hash(password: string): Promise<string> {
-    // TODO(phase-3 M2): bcrypt with the configured cost (4 in tests, 10 in production).
-    throw new Error("TODO(phase-3 M2): PasswordHasher.hash");
+    return bcrypt.hash(password, this.cost);
   }
 
   async verify(password: string, passwordHash: string | null): Promise<boolean> {
-    // TODO(phase-3 M2): bcrypt check; when password_hash is null (unknown e-mail) verify against the dummy
-    //   hash anyway and return false: same timing either way. A malformed hash -> false, never an exception.
-    throw new Error("TODO(phase-3 M2): PasswordHasher.verify");
+    let ok: boolean;
+    try {
+      ok = await bcrypt.compare(password, passwordHash ?? this.dummy);
+    } catch {
+      return false;
+    }
+    return ok && passwordHash !== null;
   }
 }
 
@@ -57,31 +62,51 @@ export class TokenService {
   }
 
   issueAccessToken(user: User): Promise<string> {
-    // TODO(phase-3 M2): HS256 JWT with sub (user id as a string), role, iss=ISSUER, iat and exp = now +
-    //   ACCESS_TOKEN_TTL (1 hour), using the injected clock.
-    throw new Error("TODO(phase-3 M2): TokenService.issueAccessToken");
+    const now = Math.floor(this.clock().getTime() / 1000);
+    return new SignJWT({ role: user.role })
+      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+      .setSubject(String(user.id))
+      .setIssuer(ISSUER)
+      .setIssuedAt(now)
+      .setExpirationTime(now + ACCESS_TOKEN_TTL_SECONDS)
+      .sign(this.key);
   }
 
   async verifyAccessToken(token: string): Promise<Principal> {
-    // TODO(phase-3 M2): pin the algorithm to HS256 (reject alg=none / RS256), check the issuer, check exp
-    //   against the injected CLOCK, sub must be ASCII digits and role a known role. Anything wrong -> 401
-    //   unauthorized 'invalid or expired token'.
-    throw new Error("TODO(phase-3 M2): TokenService.verifyAccessToken");
+    let claims;
+    try {
+      // algorithms: ["HS256"] pins the algorithm: "alg": "none" or RS256 tokens are rejected.
+      // currentDate makes jose check exp against the injected clock, so tests can travel in time.
+      ({ payload: claims } = await jwtVerify(token, this.key, {
+        algorithms: ["HS256"],
+        issuer: ISSUER,
+        currentDate: this.clock(),
+        requiredClaims: ["exp", "sub"],
+      }));
+    } catch {
+      throw unauthorized("invalid or expired token");
+    }
+    const { exp, sub, role } = claims;
+    if (typeof exp !== "number" || exp * 1000 <= this.clock().getTime()) {
+      throw unauthorized("invalid or expired token");
+    }
+    if (typeof sub !== "string" || !/^[0-9]+$/.test(sub) || !ROLES.includes(role as Role)) {
+      throw unauthorized("invalid or expired token");
+    }
+    return { userId: Number(sub), role: role as Role };
   }
 }
 
 /** The value of the X-Signature header: 'sha256=' + hex HMAC-SHA256 of the RAW request body. */
-export function signWebhook(secret: string, body: Buffer | string): string {
-  // TODO(phase-3 M2): the X-Signature value: 'sha256=' + hex HMAC-SHA256 of the RAW request body with the
-  //   webhook secret.
-  throw new Error("TODO(phase-3 M2): signWebhook");
-}
+export const signWebhook = (secret: string, body: Buffer | string) =>
+  SIGNATURE_PREFIX + createHmac("sha256", secret).update(body).digest("hex");
 
 /** Constant-time comparison: a byte-by-byte === leaks how many leading characters were right. */
 export function verifyWebhook(secret: string, body: Buffer | string, header: string | undefined): boolean {
-  // TODO(phase-3 M2): missing header or no 'sha256=' prefix -> false; otherwise compare with sign() in
-  //   CONSTANT time (never ==).
-  throw new Error("TODO(phase-3 M2): verifyWebhook");
+  if (!header || !header.startsWith(SIGNATURE_PREFIX)) return false;
+  const expected = Buffer.from(signWebhook(secret, body), "utf8");
+  const given = Buffer.from(header.trim(), "utf8");
+  return expected.length === given.length && timingSafeEqual(expected, given);
 }
 
 export const newPaymentId = () => "pay_" + randomBytes(12).toString("hex");

@@ -1,12 +1,20 @@
 // Accounts, login and roles. Framework-free: the HTTP layer only parses and formats.
 import type { Clock } from "./clock.js";
+import {
+  DuplicateError,
+  emailTaken,
+  forbidden,
+  invalidCredentials,
+  unauthorized,
+  validationError,
+} from "./errors.js";
 import type { LoginResult, Principal, Role, User } from "./models.js";
 import type { UserRepository } from "./repository.js";
 import type { PasswordHasher, TokenService } from "./security.js";
+import * as v from "./validation.js";
 
 export function requireRole(principal: Principal, ...roles: Role[]): void {
-  // TODO(phase-3 M2): 403 forbidden 'requires role X' unless principal.role is one of the given roles.
-  throw new Error("TODO(phase-3 M2): requireRole");
+  if (!roles.includes(principal.role)) throw forbidden(`requires role ${roles.join(" or ")}`);
 }
 
 export class AuthService {
@@ -18,41 +26,74 @@ export class AuthService {
   ) {}
 
   async register(payload: unknown): Promise<User> {
-    // TODO(phase-3 M2): validate email, password, displayName; ALWAYS create a CUSTOMER (ignore any 'role' in
-    //   the payload: mass assignment!); hash the password; DuplicateError -> 409 email-taken.
-    throw new Error("TODO(phase-3 M2): AuthService.register");
+    const data = v.requireObject(payload);
+    const email = v.email(data.email);
+    const password = v.password(data.password);
+    const name = v.displayName(data.displayName);
+    // Never read "role" from the request: everyone starts as CUSTOMER (mass-assignment defence).
+    try {
+      return await this.users.insertUser(
+        email,
+        await this.hasher.hash(password),
+        name,
+        "CUSTOMER",
+        this.clock(),
+      );
+    } catch (err) {
+      if (err instanceof DuplicateError) throw emailTaken();
+      throw err;
+    }
   }
 
   async login(payload: unknown): Promise<LoginResult> {
-    // TODO(phase-3 M2): email and password must be strings (400); the SAME 401 invalid-credentials for an
-    //   unknown e-mail and a wrong password, and still run one bcrypt verify for an unknown e-mail (timing).
-    //   Passwords over 72 bytes are a 401 too. Returns the access token + the user.
-    throw new Error("TODO(phase-3 M2): AuthService.login");
+    const data = v.requireObject(payload);
+    const { email, password } = data;
+    if (typeof email !== "string" || typeof password !== "string") {
+      throw validationError("email and password are required");
+    }
+    const user = await this.users.findUserByEmail(email.trim().toLowerCase());
+    // verify() also runs for unknown e-mails (against a dummy hash): same answer, same timing.
+    const ok =
+      Buffer.byteLength(password, "utf8") <= 72 &&
+      (await this.hasher.verify(password, user ? user.passwordHash : null));
+    if (!ok || !user) throw invalidCredentials();
+    return { accessToken: await this.tokens.issueAccessToken(user), user };
   }
 
   async me(principal: Principal): Promise<User> {
-    // TODO(phase-3 M2): the current user; 401 unauthorized 'account no longer exists' if it was removed.
-    throw new Error("TODO(phase-3 M2): AuthService.me");
+    const user = await this.users.findUser(principal.userId);
+    if (!user) throw unauthorized("account no longer exists");
+    return user;
   }
 
   /** Start-up bootstrap from ADMIN_EMAIL / ADMIN_PASSWORD (there is no other way to get an ADMIN). */
   async ensureAdmin(rawEmail: string, password: string): Promise<User> {
-    // TODO(phase-3 M2): create ADMIN_EMAIL as an ADMIN, or promote it if it exists. Until you build it the
-    //   app starts without an admin.
-    console.warn("TODO(phase-3 M2): ensureAdmin - starting without an admin");
-    return null as never;
+    const email = v.email(rawEmail);
+    const existing = await this.users.findUserByEmail(email);
+    if (existing)
+      return existing.role === "ADMIN" ? existing : (await this.users.updateRole(existing.id, "ADMIN"))!;
+    return this.users.insertUser(
+      email,
+      await this.hasher.hash(v.password(password)),
+      "Admin",
+      "ADMIN",
+      this.clock(),
+    );
   }
 
   async authenticate(authorization: string | undefined): Promise<Principal> {
-    // TODO(phase-3 M2): optional(header), but null -> 401 unauthorized (the HTTP layer adds WWW-
-    //   Authenticate).
-    throw new Error("TODO(phase-3 M2): AuthService.authenticate");
+    const principal = await this.optional(authorization);
+    if (!principal) throw unauthorized();
+    return principal;
   }
 
   /** No header -> anonymous. A header that is present but wrong is always a 401, never anonymous. */
   async optional(authorization: string | undefined): Promise<Principal | null> {
-    // TODO(phase-3 M2): no header -> null (anonymous). 'Bearer <jwt>' -> verify it. A header that is present
-    //   but bad is ALWAYS a 401, never silently anonymous.
-    throw new Error("TODO(phase-3 M2): AuthService.optional");
+    if (authorization === undefined) return null;
+    const space = authorization.indexOf(" ");
+    const scheme = space < 0 ? authorization : authorization.slice(0, space);
+    const token = space < 0 ? "" : authorization.slice(space + 1).trim();
+    if (scheme.toLowerCase() !== "bearer" || !token) throw unauthorized("use Authorization: Bearer <token>");
+    return this.tokens.verifyAccessToken(token);
   }
 }

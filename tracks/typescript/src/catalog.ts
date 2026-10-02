@@ -1,14 +1,21 @@
 // Catalog: products, prices, stock and search. Admins write, everybody reads active products.
+import { requireRole } from "./auth.js";
 import type { Clock } from "./clock.js";
+import {
+  DuplicateError,
+  insufficientStock,
+  notFound,
+  skuTaken,
+  validationError,
+  versionConflict,
+} from "./errors.js";
 import type { CategoryCount, Principal, Product, ProductQuery } from "./models.js";
 import type { ProductRepository } from "./repository.js";
+import * as v from "./validation.js";
 
 export const EDITABLE = ["name", "description", "category", "pricePaise", "active"] as const;
 
-export function isAdmin(p: Principal | null): boolean {
-  // TODO(phase-3 M3): true when there is a principal and its role is ADMIN.
-  throw new Error("TODO(phase-3 M3): isAdmin");
-}
+export const isAdmin = (p: Principal | null) => p !== null && p.role === "ADMIN";
 
 export interface ListParams {
   q?: string;
@@ -32,47 +39,103 @@ export class CatalogService {
   ) {}
 
   async create(principal: Principal, payload: unknown): Promise<Product> {
-    // TODO(phase-3 M3): ADMIN only; validate sku, name, description, category, pricePaise, stock (active
-    //   defaults to true); version 1; DuplicateError -> 409 sku-taken.
-    throw new Error("TODO(phase-3 M3): CatalogService.create");
+    requireRole(principal, "ADMIN");
+    const data = v.requireObject(payload);
+    const now = this.clock();
+    const product: Product = {
+      id: 0,
+      sku: v.sku(data.sku),
+      name: v.productName(data.name),
+      description: v.description(data.description),
+      category: v.category(data.category),
+      pricePaise: v.pricePaise(data.pricePaise),
+      stock: v.stock(data.stock),
+      active: data.active === null || data.active === undefined ? true : v.active(data.active),
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      return await this.products.insertProduct(product);
+    } catch (err) {
+      if (err instanceof DuplicateError) throw skuTaken();
+      throw err;
+    }
   }
 
   /** Inactive products are 404 for everyone but admins (they still exist for old orders). */
   async get(principal: Principal | null, sku: string): Promise<Product> {
-    // TODO(phase-3 M3): find by the upper-cased sku; missing, or INACTIVE for a non-admin -> 404 not-found
-    //   'product' (inactive products still exist for old orders).
-    throw new Error("TODO(phase-3 M3): CatalogService.get");
+    const product = await this.products.findProduct(sku.trim().toUpperCase());
+    if (!product || (!product.active && !isAdmin(principal))) throw notFound("product");
+    return product;
   }
 
   async update(principal: Principal, sku: string, payload: unknown): Promise<Product> {
-    // TODO(phase-3 M3): order matters (tests check it): ADMIN, object, version, nothing-to-update (400), get
-    //   (404), validate the fields that are present, save WHERE version = expected; null -> 409 version-
-    //   conflict with the CURRENT version (ADR-0003). Stock is not editable here.
-    throw new Error("TODO(phase-3 M3): CatalogService.update");
+    requireRole(principal, "ADMIN");
+    const data = v.requireObject(payload);
+    const expected = v.version(data.version);
+    if (!EDITABLE.some((k) => k in data)) {
+      throw validationError(`nothing to update: send at least one of ${EDITABLE.join(", ")}`);
+    }
+    const current = await this.get(principal, sku);
+    const changed: Product = {
+      ...current,
+      name: "name" in data ? v.productName(data.name) : current.name,
+      description: "description" in data ? v.description(data.description) : current.description,
+      category: "category" in data ? v.category(data.category) : current.category,
+      pricePaise: "pricePaise" in data ? v.pricePaise(data.pricePaise) : current.pricePaise,
+      active: "active" in data ? v.active(data.active) : current.active,
+      updatedAt: this.clock(),
+    };
+    const saved = await this.products.updateProduct(changed, expected);
+    if (!saved) {
+      const latest = await this.products.findProduct(current.sku);
+      throw versionConflict(latest ? latest.version : current.version);
+    }
+    return saved;
   }
 
   /** Stock moves by a delta in ONE guarded statement. It does not bump the version (ADR-0003). */
   async adjustStock(principal: Principal, sku: string, payload: unknown): Promise<Product> {
-    // TODO(phase-3 M3): ADMIN; validate delta; get (404); ONE guarded statement (stock + delta >= 0) in the
-    //   repository; null -> 409 insufficient-stock 'stock cannot go below 0 (current stock N)'. Does not bump
-    //   the version.
-    throw new Error("TODO(phase-3 M3): CatalogService.adjustStock");
+    requireRole(principal, "ADMIN");
+    const delta = v.stockDelta(v.requireObject(payload).delta);
+    const current = await this.get(principal, sku);
+    const saved = await this.products.adjustStock(current.id, delta, this.clock());
+    if (!saved) {
+      const latest = await this.products.findProduct(current.sku);
+      throw insufficientStock(
+        `stock cannot go below 0 (current stock ${latest ? latest.stock : current.stock})`,
+      );
+    }
+    return saved;
   }
 
   async list(params: ListParams = {}): Promise<Page<Product>> {
-    // TODO(phase-3 M3): validate every query parameter (limit, cursor, q, category, minPricePaise,
-    //   maxPricePaise, inStock) into a ProductQuery and call search().
-    throw new Error("TODO(phase-3 M3): CatalogService.list");
+    return this.search({
+      limit: v.limit(params.limit),
+      afterId: v.decodeCursor(params.cursor),
+      q: v.searchQuery(params.q),
+      category: v.categoryFilter(params.category),
+      minPricePaise: v.priceFilter(params.minPrice, "minPricePaise"),
+      maxPricePaise: v.priceFilter(params.maxPrice, "maxPricePaise"),
+      inStock: v.boolFilter(params.inStock, "inStock"),
+    });
   }
 
   async search(query: ProductQuery): Promise<Page<Product>> {
-    // TODO(phase-3 M3): min > max -> 400; ask the repository for limit + 1 rows (active only, id > cursor,
-    //   ordered by id); an extra row means nextCursor = encode_cursor(last row SHOWN).
-    throw new Error("TODO(phase-3 M3): CatalogService.search");
+    const lo = query.minPricePaise ?? null;
+    const hi = query.maxPricePaise ?? null;
+    if (lo !== null && hi !== null && lo > hi) {
+      throw validationError("minPricePaise must not be greater than maxPricePaise");
+    }
+    // Ask for one extra row: if it exists there is a next page (no COUNT(*) needed).
+    const rows = await this.products.searchProducts({ ...query, limit: query.limit + 1 });
+    const items = rows.slice(0, query.limit);
+    const nextCursor = rows.length > query.limit ? v.encodeCursor(items[items.length - 1]!.id) : null;
+    return { items, nextCursor };
   }
 
   categories(): Promise<CategoryCount[]> {
-    // TODO(phase-3 M3): category counts of active products, sorted by name (straight from the repository).
-    throw new Error("TODO(phase-3 M3): CatalogService.categories");
+    return this.products.categories();
   }
 }
